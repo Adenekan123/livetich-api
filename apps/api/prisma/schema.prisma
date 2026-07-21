@@ -1,0 +1,194 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  INSTRUCTOR
+  STUDENT
+}
+
+enum SessionStatus {
+  SCHEDULED
+  LIVE
+  ENDED
+}
+
+enum QuizType {
+  SECTION
+  BUZZER
+}
+
+enum PointsReason {
+  QUIZ_CORRECT
+  BUZZER_WIN
+  PARTICIPATION
+}
+
+model User {
+  id           String   @id @default(cuid())
+  role         Role
+  name         String
+  email        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+
+  coursesTaught Course[]       @relation("instructor")
+  enrollments   Enrollment[]
+  chatMessages  ChatMessage[]
+  quizAnswers   QuizAnswer[]
+  pointsEntries PointsLedger[]
+  certificates  Certificate[]  @relation("certStudent")
+}
+
+model Course {
+  id           String   @id @default(cuid())
+  instructorId String
+  title        String
+  description  String?  @db.Text
+  createdAt    DateTime @default(now())
+
+  instructor   User          @relation("instructor", fields: [instructorId], references: [id])
+  sections     Section[]
+  enrollments  Enrollment[]
+  sessions     LiveSession[]
+  points       PointsLedger[]
+  certificates Certificate[]
+
+  @@index([instructorId])
+}
+
+model Section {
+  id       String @id @default(cuid())
+  courseId String
+  order    Int
+  title    String
+
+  course  Course        @relation(fields: [courseId], references: [id])
+  quizzes Quiz[]
+  session LiveSession[]
+
+  @@unique([courseId, order])
+}
+
+model Enrollment {
+  id        String   @id @default(cuid())
+  courseId  String
+  studentId String
+  createdAt DateTime @default(now())
+
+  course  Course @relation(fields: [courseId], references: [id])
+  student User   @relation(fields: [studentId], references: [id])
+
+  @@unique([courseId, studentId])
+  @@index([studentId])
+}
+
+model LiveSession {
+  id          String        @id @default(cuid())
+  courseId    String
+  sectionId   String?
+  status      SessionStatus @default(SCHEDULED)
+  livekitRoom String        @unique
+  scheduledAt DateTime
+  startedAt   DateTime?
+  endedAt     DateTime?
+
+  course   Course        @relation(fields: [courseId], references: [id])
+  section  Section?      @relation(fields: [sectionId], references: [id])
+  messages ChatMessage[]
+  quizzes  Quiz[]
+
+  @@index([courseId, status])
+}
+
+model ChatMessage {
+  id        String   @id @default(cuid())
+  sessionId String
+  userId    String
+  body      String   @db.Text
+  createdAt DateTime @default(now())
+
+  session LiveSession @relation(fields: [sessionId], references: [id])
+  user    User        @relation(fields: [userId], references: [id])
+
+  @@index([sessionId, createdAt])
+}
+
+model Quiz {
+  id        String   @id @default(cuid())
+  sectionId String?
+  sessionId String?
+  type      QuizType
+  createdAt DateTime @default(now())
+
+  section   Section?       @relation(fields: [sectionId], references: [id])
+  session   LiveSession?   @relation(fields: [sessionId], references: [id])
+  questions QuizQuestion[]
+}
+
+model QuizQuestion {
+  id           String @id @default(cuid())
+  quizId       String
+  body         String @db.Text
+  /// string[] — MySQL has no native array type
+  options      Json
+  correctIndex Int
+  timeLimitSec Int    @default(60)
+
+  quiz    Quiz         @relation(fields: [quizId], references: [id])
+  answers QuizAnswer[]
+}
+
+model QuizAnswer {
+  id          String   @id @default(cuid())
+  questionId  String
+  studentId   String
+  answerIndex Int
+  /// Server receipt time — authoritative for buzzer ordering (DATETIME(3)).
+  receivedAt  DateTime @default(now())
+  isCorrect   Boolean
+
+  question QuizQuestion @relation(fields: [questionId], references: [id])
+  student  User         @relation(fields: [studentId], references: [id])
+
+  @@unique([questionId, studentId])
+  @@index([questionId, receivedAt])
+}
+
+/// Append-only. The Redis leaderboard is a projection of this table.
+model PointsLedger {
+  id        String       @id @default(cuid())
+  studentId String
+  courseId  String
+  delta     Int
+  reason    PointsReason
+  /// e.g. questionId or sessionId the points came from
+  refId     String?
+  createdAt DateTime     @default(now())
+
+  student User   @relation(fields: [studentId], references: [id])
+  course  Course @relation(fields: [courseId], references: [id])
+
+  @@index([courseId, studentId])
+}
+
+model Certificate {
+  id               String   @id @default(cuid())
+  courseId         String
+  studentId        String
+  /// Public code embedded in the QR; resolves via /verify/{code}
+  verificationCode String   @unique
+  pdfUrl           String?
+  issuedById       String
+  issuedAt         DateTime @default(now())
+
+  course  Course @relation(fields: [courseId], references: [id])
+  student User   @relation("certStudent", fields: [studentId], references: [id])
+
+  @@unique([courseId, studentId])
+}

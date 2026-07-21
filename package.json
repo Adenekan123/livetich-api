@@ -1,0 +1,18 @@
+{
+  "name": "livetich",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Live-teaching platform: interactive classes, quizzes, points and certificates.",
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev:api": "pnpm --filter @livetich/api start:dev",
+    "dev:web": "pnpm --filter @livetich/web dev",
+    "db:migrate": "pnpm --filter @livetich/api prisma:migrate",
+    "db:generate": "pnpm --filter @livetich/api prisma:generate",
+    "lint": "pnpm -r lint"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@9.15.4"
+}
