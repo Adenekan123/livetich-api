@@ -104,6 +104,12 @@ export interface ServerToClientEvents {
 
   'buzzer:state': (p: { sessionId: string; state: BuzzerState }) => void;
 
+  /** Personal result of a quiz/buzzer answer (sent only to the answerer). */
+  'quiz:answer-result': (p: {
+    questionId: string;
+    isCorrect: boolean;
+  }) => void;
+
   'student:picked': (p: { sessionId: string; user: RoomUser }) => void;
 
   'screen-share:granted': (p: { sessionId: string; userId: string }) => void;

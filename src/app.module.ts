@@ -3,6 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { PrismaModule } from './prisma/prisma.module';
+import { RedisModule } from './redis/redis.module';
 import { RoomGatewayModule } from './room-gateway/room-gateway.module';
 import { AuthModule } from './auth/auth.module';
 import { CoursesModule } from './courses/courses.module';
@@ -16,6 +17,7 @@ import { BoardModule } from './board/board.module';
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     PrismaModule,
+    RedisModule,
     RoomGatewayModule,
     AuthModule,
     CoursesModule,

@@ -1,7 +1,7 @@
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Role } from '@prisma/client';
-import { AccessToken } from 'livekit-server-sdk';
+import { AccessToken, RoomServiceClient } from 'livekit-server-sdk';
 
 @Injectable()
 export class LivekitService {
@@ -40,5 +40,28 @@ export class LivekitService {
       canPublishData: true,
     });
     return at.toJwt();
+  }
+
+  /**
+   * Toggle a participant's publish rights (screen-share grant/revoke).
+   * Requires reachable LiveKit server credentials.
+   */
+  async setPublishPermission(room: string, identity: string, canPublish: boolean) {
+    const url = this.config.get<string>('LIVEKIT_URL');
+    const key = this.config.get<string>('LIVEKIT_API_KEY');
+    const secret = this.config.get<string>('LIVEKIT_API_SECRET');
+    if (!url || !key || !secret) {
+      throw new ServiceUnavailableException('LiveKit is not configured');
+    }
+    const client = new RoomServiceClient(
+      url.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:'),
+      key,
+      secret,
+    );
+    await client.updateParticipant(room, identity, undefined, {
+      canPublish,
+      canSubscribe: true,
+      canPublishData: true,
+    });
   }
 }
