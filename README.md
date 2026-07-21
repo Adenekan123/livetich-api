@@ -1,20 +1,19 @@
-# livetich
+# livetich-api
 
-Live-teaching platform: instructors teach skills over interactive live streams — chalkboard, chat, raise-hand, quizzes with a public points leaderboard, a "millionaire-style" buzzer round, and verifiable certificates.
+Backend for **livetich** — a live-teaching platform: instructors teach skills over interactive live streams with chalkboard, chat, raise-hand, quizzes, a public points leaderboard, a "millionaire-style" buzzer round, and verifiable certificates.
+
+Frontend lives in the sibling repo: **livetich-web** (Next.js).
 
 ## Stack
 
 | Layer | Choice |
 |---|---|
-| Backend | NestJS (`apps/api`) |
-| Frontend | Next.js (`apps/web`) |
-| Shared realtime contract | `packages/shared` (typed Socket.IO events) |
+| Framework | NestJS 11 |
 | Database | MySQL 8 + Prisma |
-| Realtime state | Socket.IO + Redis adapter (room-sharded, server-authoritative timing) |
+| Realtime | Socket.IO + Redis adapter (room-sharded, server-authoritative timing) |
 | Media | LiveKit (WebRTC SFU) — instructor publishes, students subscribe, screen-share by grant |
 | Queue | BullMQ (certificates, recordings, notifications) |
 | Object storage | Cloudflare R2 (recordings, certificate PDFs) |
-| Chalkboard | tldraw/Excalidraw + Yjs (planned) |
 
 Max class size target: 500 students (single LiveKit room; 1–2 publishers at a time).
 
@@ -22,12 +21,16 @@ Max class size target: 500 students (single LiveKit room; 1–2 publishers at a 
 
 ```bash
 pnpm install
-docker compose up -d            # MySQL 8 + Redis
-cp .env.example apps/api/.env   # then fill in secrets
-pnpm db:migrate                 # prisma migrate dev
-pnpm dev:api                    # NestJS on :3000
-pnpm dev:web                    # Next.js on :3001 (or next free port)
+docker compose up -d      # MySQL 8 + Redis
+cp .env.example .env      # then fill in secrets
+pnpm prisma:migrate
+pnpm start:dev            # NestJS on :3000
 ```
+
+## Realtime contract
+
+`src/shared/index.ts` defines every socket event and payload type.
+**Keep it in sync with `livetich-web/src/lib/realtime-contract.ts`** — same file, two copies, until it's worth extracting a published package.
 
 ## Architecture notes
 
@@ -40,10 +43,10 @@ pnpm dev:web                    # Next.js on :3001 (or next free port)
   Broadcasts are batched (1–2s tick), not per-event.
 - **Certificates**: issuance enqueues a BullMQ job → PDF render → R2 upload →
   public verification at `/verify/{code}` via QR.
-- **Screen share** (#8): app emits `screen-share:grant` → api updates the LiveKit
+- **Screen share**: web emits `screen-share:grant` → api updates the LiveKit
   participant's publish permission; revoke mirrors it.
 
-## Roadmap (module stubs in `apps/api/src`)
+## Roadmap (module stubs in `src/`)
 
 1. `auth` — JWT auth, roles; same identity claims embedded in LiveKit tokens
 2. `courses` — courses/sections/enrollments CRUD

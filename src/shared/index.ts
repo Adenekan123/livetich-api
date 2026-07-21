@@ -1,4 +1,5 @@
-// Single source of truth for the realtime contract between api and web.
+// Realtime contract between livetich-api and livetich-web.
+// KEEP IN SYNC with livetich-web/src/lib/realtime-contract.ts
 
 // ---------- Domain ----------
 

@@ -11,7 +11,7 @@ import {
 import type {
   ClientToServerEvents,
   ServerToClientEvents,
-} from '@livetich/shared';
+} from '../shared';
 import type { Server, Socket } from 'socket.io';
 
 type RoomServer = Server<ClientToServerEvents, ServerToClientEvents>;
