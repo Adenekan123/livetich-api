@@ -117,3 +117,26 @@ export interface ServerToClientEvents {
 
   error: (p: { code: string; message: string }) => void;
 }
+
+// ---------- Chalkboard (Yjs, separate /board namespace) ----------
+
+/** Yjs binary payload — Buffer on the server, ArrayBuffer in the browser. */
+export type BoardBinary = ArrayBuffer | Uint8Array;
+
+export interface BoardClientToServerEvents {
+  'board:join': (p: { sessionId: string }) => void;
+  'board:leave': (p: { sessionId: string }) => void;
+  /** Instructor-only: incremental Yjs document update. */
+  'board:update': (p: { sessionId: string; update: BoardBinary }) => void;
+  /** Cursor/selection presence — relayed to the room, never persisted. */
+  'board:awareness': (p: { sessionId: string; update: BoardBinary }) => void;
+}
+
+export interface BoardServerToClientEvents {
+  /** Full document state, sent to the joining client after board:join. */
+  'board:state': (p: { sessionId: string; update: BoardBinary }) => void;
+  'board:update': (p: { sessionId: string; update: BoardBinary }) => void;
+  'board:awareness': (p: { sessionId: string; update: BoardBinary }) => void;
+
+  error: (p: { code: string; message: string }) => void;
+}

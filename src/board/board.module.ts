@@ -1,5 +1,8 @@
 import { Module } from '@nestjs/common';
+import { BoardDocService } from './board-doc.service';
+import { BoardGateway } from './board.gateway';
 
-// TODO: implement (see README roadmap)
-@Module({})
+@Module({
+  providers: [BoardGateway, BoardDocService],
+})
 export class BoardModule {}
