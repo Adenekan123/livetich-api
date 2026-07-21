@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { Role } from '@prisma/client';
 import { CurrentUser } from '../auth/current-user.decorator';
+import { Public } from '../auth/jwt-auth.guard';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { Roles } from '../auth/roles.guard';
 import { CoursesService } from './courses.service';
@@ -21,8 +22,9 @@ import { UpdateSectionDto } from './dto/update-section.dto';
 export class CoursesController {
   constructor(private readonly courses: CoursesService) {}
 
-  // ---------- Browse (any authenticated user) ----------
+  // ---------- Browse (public — the course catalog is the storefront) ----------
 
+  @Public()
   @Get()
   list() {
     return this.courses.listCourses();
@@ -35,6 +37,7 @@ export class CoursesController {
     return this.courses.listEnrolled(user.sub);
   }
 
+  @Public()
   @Get(':id')
   get(@Param('id') id: string) {
     return this.courses.getCourse(id);

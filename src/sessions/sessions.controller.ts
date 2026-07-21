@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { Role } from '@prisma/client';
 import { CurrentUser } from '../auth/current-user.decorator';
+import { Public } from '../auth/jwt-auth.guard';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { Roles } from '../auth/roles.guard';
 import { CreateSessionDto } from './dto/create-session.dto';
@@ -16,11 +17,14 @@ export class SessionsController {
     return this.sessions.schedule(user.sub, dto);
   }
 
+  /** Public: the course page shows the schedule to anonymous visitors. */
+  @Public()
   @Get()
   list(@Query('courseId') courseId: string) {
     return this.sessions.listForCourse(courseId);
   }
 
+  @Public()
   @Get(':id')
   get(@Param('id') id: string) {
     return this.sessions.get(id);
