@@ -1,5 +1,10 @@
 import { Module } from '@nestjs/common';
+import { PointsController } from './points.controller';
+import { PointsService } from './points.service';
 
-// TODO: implement (see README roadmap)
-@Module({})
+@Module({
+  controllers: [PointsController],
+  providers: [PointsService],
+  exports: [PointsService],
+})
 export class PointsModule {}
