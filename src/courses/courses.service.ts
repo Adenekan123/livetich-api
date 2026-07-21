@@ -47,14 +47,14 @@ export class CoursesService {
   }
 
   async updateCourse(instructorId: string, id: string, dto: UpdateCourseDto) {
-    await this.assertOwner(instructorId, id);
+    await this.assertCourseOwner(instructorId, id);
     return this.prisma.course.update({ where: { id }, data: dto });
   }
 
   // ---------- Sections ----------
 
   async addSection(instructorId: string, courseId: string, dto: CreateSectionDto) {
-    await this.assertOwner(instructorId, courseId);
+    await this.assertCourseOwner(instructorId, courseId);
     const order = dto.order ?? (await this.nextSectionOrder(courseId));
     try {
       return await this.prisma.section.create({
@@ -71,7 +71,7 @@ export class CoursesService {
     sectionId: string,
     dto: UpdateSectionDto,
   ) {
-    await this.assertOwner(instructorId, courseId);
+    await this.assertCourseOwner(instructorId, courseId);
     const section = await this.prisma.section.findFirst({
       where: { id: sectionId, courseId },
     });
@@ -118,7 +118,7 @@ export class CoursesService {
   }
 
   async listStudents(instructorId: string, courseId: string) {
-    await this.assertOwner(instructorId, courseId);
+    await this.assertCourseOwner(instructorId, courseId);
     return this.prisma.enrollment.findMany({
       where: { courseId },
       include: {
@@ -142,7 +142,7 @@ export class CoursesService {
 
   // ---------- Helpers ----------
 
-  private async assertOwner(instructorId: string, courseId: string) {
+  async assertCourseOwner(instructorId: string, courseId: string) {
     const course = await this.prisma.course.findUnique({
       where: { id: courseId },
       select: { instructorId: true },
