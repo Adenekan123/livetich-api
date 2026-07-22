@@ -136,6 +136,27 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
       locked: await this.state.isChatLocked(p.sessionId),
     });
     await this.broadcastHands(p.sessionId, client);
+    await this.sendChatHistory(p.sessionId, client);
+  }
+
+  /** Last 50 messages so late joiners aren't dropped into a blank chat. */
+  private async sendChatHistory(sessionId: string, client: RoomSocket) {
+    const recent = await this.prisma.chatMessage.findMany({
+      where: { sessionId },
+      include: { user: { select: { id: true, name: true, role: true } } },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    });
+    client.emit('chat:history', {
+      sessionId,
+      messages: recent.reverse().map((m) => ({
+        id: m.id,
+        sessionId,
+        user: { userId: m.user.id, name: m.user.name, role: m.user.role },
+        body: m.body,
+        sentAt: m.createdAt.toISOString(),
+      })),
+    });
   }
 
   @SubscribeMessage('room:leave')

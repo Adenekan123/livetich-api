@@ -52,6 +52,21 @@ export class QuizService {
     });
   }
 
+  /** Session quizzes for the owning instructor (drives the buzzer UI). */
+  async listForSession(instructorId: string, sessionId: string) {
+    const session = await this.prisma.liveSession.findUnique({
+      where: { id: sessionId },
+      select: { courseId: true },
+    });
+    if (!session) throw new NotFoundException('Session not found');
+    await this.courses.assertCourseOwner(instructorId, session.courseId);
+    return this.prisma.quiz.findMany({
+      where: { sessionId },
+      include: { questions: true },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
+
   /** Instructors who own the quiz see correctIndex; students never do. */
   async get(user: JwtPayload, id: string) {
     const quiz = await this.prisma.quiz.findUnique({

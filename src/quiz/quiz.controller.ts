@@ -1,4 +1,12 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  Param,
+  Post,
+  Query,
+} from '@nestjs/common';
 import { Role } from '@prisma/client';
 import { CurrentUser } from '../auth/current-user.decorator';
 import type { JwtPayload } from '../auth/jwt-payload';
@@ -15,6 +23,14 @@ export class QuizController {
   @Roles(Role.INSTRUCTOR)
   create(@CurrentUser() user: JwtPayload, @Body() dto: CreateQuizDto) {
     return this.quiz.create(user.sub, dto);
+  }
+
+  /** Declared before :id so "quizzes?sessionId=…" isn't matched as an id. */
+  @Get()
+  @Roles(Role.INSTRUCTOR)
+  list(@CurrentUser() user: JwtPayload, @Query('sessionId') sessionId: string) {
+    if (!sessionId) throw new BadRequestException('sessionId is required');
+    return this.quiz.listForSession(user.sub, sessionId);
   }
 
   @Get(':id')

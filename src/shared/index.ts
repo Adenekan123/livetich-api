@@ -90,6 +90,8 @@ export interface ServerToClientEvents {
   'room:presence': (p: { sessionId: string; users: RoomUser[] }) => void;
 
   'chat:message': (p: ChatMessage) => void;
+  /** Recent messages, sent once to the joining client. */
+  'chat:history': (p: { sessionId: string; messages: ChatMessage[] }) => void;
   'chat:locked': (p: { sessionId: string; locked: boolean }) => void;
 
   'hands:update': (p: { sessionId: string; raised: RoomUser[] }) => void;

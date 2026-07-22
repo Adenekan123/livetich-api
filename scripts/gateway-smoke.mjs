@@ -156,7 +156,10 @@ sSock.emit('quiz:answer', { sessionId: sid, questionId: q1, answerIndex: 1 });
 await rejected;
 check('second attempt rejected', true);
 
-// student2 answers correct -> winner + points + leaderboard
+// student2 answers correct -> winner + points + leaderboard.
+// The ledger accumulates across runs, so assert the delta rather than a total.
+const lbBefore = await req('GET', `/points/leaderboard?courseId=${courseId}`, it);
+const s2Before = lbBefore.find((e) => e.name === 'Second Student')?.points ?? 0;
 const winnerSeen = waitFor(iSock, 'buzzer:state', (p) => p.state.phase === 'WINNER');
 const lbSeen = waitFor(iSock, 'leaderboard:update');
 s2Sock.emit('quiz:answer', { sessionId: sid, questionId: q1, answerIndex: 1 });
@@ -165,8 +168,8 @@ check('correct answer wins buzzer', winner.state.winner.name === 'Second Student
   winner.state.winner.name);
 const lb = await lbSeen;
 const s2Row = lb.entries.find((e) => e.name === 'Second Student');
-check('buzzer win awards +25 on leaderboard', s2Row.points === 45,
-  `points=${s2Row.points} (20 quiz + 25 buzzer)`);
+check('buzzer win awards +25 on leaderboard', s2Row.points === s2Before + 25,
+  `points=${s2Row.points} (was ${s2Before})`);
 
 // timeout path: raise a hand again, open 5s question, let it expire
 sSock.emit('hand:raise', { sessionId: sid });
