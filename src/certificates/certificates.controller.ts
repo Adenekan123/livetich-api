@@ -2,17 +2,20 @@ import {
   Body,
   Controller,
   Get,
+  Inject,
+  NotFoundException,
   Param,
   Post,
   StreamableFile,
 } from '@nestjs/common';
 import { Role } from '@prisma/client';
-import { createReadStream } from 'node:fs';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { Public } from '../auth/jwt-auth.guard';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { Roles } from '../auth/roles.guard';
-import { CertificateStorage } from './certificate-storage';
+import { OBJECT_STORAGE } from '../storage/object-storage';
+import type { ObjectStorage } from '../storage/object-storage';
+import { certificateKey } from './certificates.constants';
 import { CertificatesService } from './certificates.service';
 import { IssueCertificateDto } from './dto/issue-certificate.dto';
 
@@ -20,7 +23,7 @@ import { IssueCertificateDto } from './dto/issue-certificate.dto';
 export class CertificatesController {
   constructor(
     private readonly certificates: CertificatesService,
-    private readonly storage: CertificateStorage,
+    @Inject(OBJECT_STORAGE) private readonly storage: ObjectStorage,
   ) {}
 
   @Post()
@@ -54,7 +57,11 @@ export class CertificatesController {
   @Get(':id/download')
   async download(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
     const cert = await this.certificates.getForDownload(user.sub, id);
-    return new StreamableFile(createReadStream(this.storage.pathFor(cert.id)), {
+    const stream = await this.storage.getStream(certificateKey(cert.id));
+    if (!stream) {
+      throw new NotFoundException('PDF not generated yet — try again shortly');
+    }
+    return new StreamableFile(stream, {
       type: 'application/pdf',
       disposition: `attachment; filename="certificate-${cert.verificationCode}.pdf"`,
     });

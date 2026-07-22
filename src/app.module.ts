@@ -5,6 +5,7 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
+import { StorageModule } from './storage/storage.module';
 import { RoomGatewayModule } from './room-gateway/room-gateway.module';
 import { AuthModule } from './auth/auth.module';
 import { CoursesModule } from './courses/courses.module';
@@ -35,6 +36,7 @@ import { BoardModule } from './board/board.module';
     }),
     PrismaModule,
     RedisModule,
+    StorageModule,
     RoomGatewayModule,
     AuthModule,
     CoursesModule,

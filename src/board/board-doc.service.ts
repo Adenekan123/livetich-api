@@ -1,8 +1,7 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import * as Y from 'yjs';
+import { OBJECT_STORAGE } from '../storage/object-storage';
+import type { ObjectStorage } from '../storage/object-storage';
 
 interface BoardEntry {
   doc: Y.Doc;
@@ -10,10 +9,12 @@ interface BoardEntry {
   clients: number;
 }
 
+const boardKey = (sessionId: string) => `boards/${sessionId}.bin`;
+
 /**
  * Server-side Yjs document per session. Docs live in memory while clients
- * are connected; snapshots go to local disk (R2 later) every FLUSH_MS and
- * when the last client leaves.
+ * are connected; snapshots go to object storage (local disk or R2) every
+ * FLUSH_MS and when the last client leaves.
  *
  * Doc authority is per-process: with multiple gateway instances the Redis
  * adapter still fans updates out to clients everywhere, but only the
@@ -25,15 +26,13 @@ export class BoardDocService implements OnModuleDestroy {
   private static readonly FLUSH_MS = 15_000;
 
   private readonly logger = new Logger(BoardDocService.name);
-  private readonly dir: string;
   private readonly boards = new Map<string, BoardEntry>();
   private readonly loading = new Map<string, Promise<BoardEntry>>();
   private readonly flushTimer: NodeJS.Timeout;
 
-  constructor(config: ConfigService) {
-    this.dir =
-      config.get<string>('BOARD_STORAGE_DIR') ??
-      join(process.cwd(), 'storage', 'boards');
+  constructor(
+    @Inject(OBJECT_STORAGE) private readonly storage: ObjectStorage,
+  ) {
     this.flushTimer = setInterval(
       () => void this.flushDirty(),
       BoardDocService.FLUSH_MS,
@@ -83,11 +82,8 @@ export class BoardDocService implements OnModuleDestroy {
     if (!pending) {
       pending = (async () => {
         const doc = new Y.Doc();
-        try {
-          Y.applyUpdate(doc, await readFile(this.pathFor(sessionId)));
-        } catch {
-          // No snapshot yet — start blank.
-        }
+        const snapshot = await this.storage.get(boardKey(sessionId));
+        if (snapshot) Y.applyUpdate(doc, snapshot);
         const entry: BoardEntry = { doc, dirty: false, clients: 0 };
         this.boards.set(sessionId, entry);
         return entry;
@@ -105,18 +101,14 @@ export class BoardDocService implements OnModuleDestroy {
 
   private async flush(sessionId: string, entry: BoardEntry) {
     try {
-      await mkdir(this.dir, { recursive: true });
-      await writeFile(
-        this.pathFor(sessionId),
-        Y.encodeStateAsUpdate(entry.doc),
+      await this.storage.put(
+        boardKey(sessionId),
+        Buffer.from(Y.encodeStateAsUpdate(entry.doc)),
+        'application/octet-stream',
       );
       entry.dirty = false;
     } catch (e) {
       this.logger.error(`Board flush failed for ${sessionId}: ${String(e)}`);
     }
-  }
-
-  private pathFor(sessionId: string) {
-    return join(this.dir, `${sessionId}.bin`);
   }
 }

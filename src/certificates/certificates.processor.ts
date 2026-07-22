@@ -1,13 +1,15 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
-import { Logger } from '@nestjs/common';
+import { Inject, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Job } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
+import { OBJECT_STORAGE } from '../storage/object-storage';
+import type { ObjectStorage } from '../storage/object-storage';
 import { renderCertificatePdf } from './certificate-pdf';
-import { CertificateStorage } from './certificate-storage';
 import {
   CERTIFICATES_QUEUE,
   GenerateCertificateJob,
+  certificateKey,
 } from './certificates.constants';
 
 @Processor(CERTIFICATES_QUEUE)
@@ -17,7 +19,7 @@ export class CertificatesProcessor extends WorkerHost {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly storage: CertificateStorage,
+    @Inject(OBJECT_STORAGE) private readonly storage: ObjectStorage,
     config: ConfigService,
   ) {
     super();
@@ -49,7 +51,7 @@ export class CertificatesProcessor extends WorkerHost {
       verificationCode: cert.verificationCode,
       verifyUrl: `${this.verifyBase}/${cert.verificationCode}`,
     });
-    await this.storage.write(cert.id, pdf);
+    await this.storage.put(certificateKey(cert.id), pdf, 'application/pdf');
 
     await this.prisma.certificate.update({
       where: { id: cert.id },
