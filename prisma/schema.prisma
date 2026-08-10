@@ -10,6 +10,14 @@ datasource db {
 enum Role {
   INSTRUCTOR
   STUDENT
+  ORG_ADMIN
+}
+
+/** Account access state. Disabled users cannot log in and their live sessions
+ *  are rejected on the next request (the JWT guard checks this). */
+enum UserStatus {
+  ACTIVE
+  DISABLED
 }
 
 enum SessionStatus {
@@ -29,37 +37,139 @@ enum PointsReason {
   PARTICIPATION
 }
 
-model User {
+/// Lifecycle of a remediation task auto-assigned after a missed topic.
+enum RemediationStatus {
+  PENDING
+  DONE
+}
+
+/// A tenant: the teaching company. Owns its people, courses, and brand kit.
+model Organization {
   id           String   @id @default(cuid())
-  role         Role
   name         String
-  email        String   @unique
-  passwordHash String
+  slug         String   @unique
+  // ---- Brand kit ----
+  logoUrl      String?
+  primaryColor String? // hex, e.g. "#0a0a0a" — drives themed accents
+  accentColor  String?
+  tagline      String?
   createdAt    DateTime @default(now())
 
-  coursesTaught Course[]       @relation("instructor")
-  enrollments   Enrollment[]
-  chatMessages  ChatMessage[]
-  quizAnswers   QuizAnswer[]
-  pointsEntries PointsLedger[]
-  certificates  Certificate[]  @relation("certStudent")
+  users      User[]
+  courses    Course[]
+  invites    Invite[]
+  orgPlugins OrgPlugin[]
+}
+
+/// An enabled add-on pack for a tenant. The catalog of pluginKeys lives in code
+/// (plugins/catalog.ts); a row here means "this org has this pack turned on".
+/// Free during the pilot; the same row becomes the paywall entitlement later.
+model OrgPlugin {
+  id             String   @id @default(cuid())
+  organizationId String
+  pluginKey      String
+  enabledAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, pluginKey])
+  @@index([organizationId])
+}
+
+/// A shareable registration link that binds the joiner to an org + role.
+model Invite {
+  id             String    @id @default(cuid())
+  organizationId String
+  role           Role // STUDENT or INSTRUCTOR
+  token          String    @unique
+  label          String?
+  createdById    String
+  maxUses        Int? // null = unlimited
+  uses           Int       @default(0)
+  expiresAt      DateTime?
+  revokedAt      DateTime?
+  createdAt      DateTime  @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  createdBy    User         @relation("inviteCreator", fields: [createdById], references: [id])
+
+  @@index([organizationId])
+}
+
+model User {
+  id             String   @id @default(cuid())
+  role           Role
+  status         UserStatus @default(ACTIVE)
+  name           String
+  email          String   @unique
+  passwordHash   String
+  organizationId String?
+  createdAt      DateTime @default(now())
+
+  // Password reset — a hashed one-time token + its expiry (see auth.service).
+  resetTokenHash      String?
+  resetTokenExpiresAt DateTime?
+
+  // Email verification — hashed 6-digit OTP + expiry; gate is enforced in the guard.
+  emailVerified      Boolean   @default(false)
+  verifyOtpHash      String?
+  verifyOtpExpiresAt DateTime?
+
+  organization       Organization?  @relation(fields: [organizationId], references: [id])
+  coursesTaught      Course[]       @relation("instructor")
+  enrollments        Enrollment[]
+  chatMessages       ChatMessage[]
+  quizAnswers        QuizAnswer[]
+  pointsEntries      PointsLedger[]
+  certificates       Certificate[]  @relation("certStudent")
+  createdInvites     Invite[]       @relation("inviteCreator")
+  attendances        Attendance[]
+  createdAssignments Assignment[]   @relation("assignmentCreator")
+  submissions        Submission[]   @relation("submissionStudent")
+  groupMemberships   StudentGroupMember[]
+  assessmentAttempts AssessmentAttempt[]
+  remediations       AssignedRemediation[]
+
+  @@index([organizationId])
 }
 
 model Course {
-  id           String   @id @default(cuid())
-  instructorId String
-  title        String
-  description  String?  @db.Text
-  createdAt    DateTime @default(now())
+  id             String   @id @default(cuid())
+  organizationId String? // owning tenant (backfilled; always set for new courses)
+  instructorId   String? // assigned by the org admin; null = unassigned
+  title          String
+  description    String?  @db.Text
+  posterUrl      String?
+  createdAt      DateTime @default(now())
 
-  instructor   User          @relation("instructor", fields: [instructorId], references: [id])
+  // ---- Cohort program (descriptive; live sessions are still scheduled per occurrence) ----
+  category      String? // e.g. "Software Engineering", "Design", "Business"
+  level         String? // "Beginner" | "Intermediate" | "Advanced"
+  startDate     DateTime? // first day of the cohort
+  durationWeeks Int? // program length; drives the end date + "N weeks" label
+  /// Weekly meeting days as int[] (0=Sun … 6=Sat). MySQL has no array type.
+  meetingDays   Json?
+  meetingTime   String? // local start time, 24h "HH:mm" (e.g. "18:00")
+  timezone      String? // IANA zone or short label shown to students (e.g. "Africa/Lagos" / "WAT")
+  /// Bumped whenever a schedule field changes; drives "your reminder is stale".
+  scheduleUpdatedAt DateTime?
+
+  organization Organization?  @relation(fields: [organizationId], references: [id])
+  instructor   User?          @relation("instructor", fields: [instructorId], references: [id])
   sections     Section[]
   enrollments  Enrollment[]
   sessions     LiveSession[]
   points       PointsLedger[]
   certificates Certificate[]
+  assignments  Assignment[]
+  studentGroups StudentGroup[]
+  assessmentQuestions AssessmentQuestion[]
+  remediationTasks    RemediationTask[]
+  assessments         Assessment[]
+  documents           CourseDocument[]
 
   @@index([instructorId])
+  @@index([organizationId])
 }
 
 model Section {
@@ -68,11 +178,83 @@ model Section {
   order    Int
   title    String
 
-  course  Course        @relation(fields: [courseId], references: [id])
-  quizzes Quiz[]
-  session LiveSession[]
+  course      Course        @relation(fields: [courseId], references: [id])
+  quizzes     Quiz[]
+  session     LiveSession[]
+  assignments Assignment[]
+  assessmentQuestions AssessmentQuestion[]
+  remediationTasks    RemediationTask[]
 
   @@unique([courseId, order])
+}
+
+/// Coursework set by the instructor/admin; students submit once each.
+model Assignment {
+  id           String    @id @default(cuid())
+  courseId     String
+  sectionId    String?
+  /// Target audience: null = whole class; set = only this group's members.
+  groupId      String?
+  title        String
+  instructions String?   @db.Text
+  dueAt        DateTime?
+  maxPoints    Int?
+  createdById  String
+  createdAt    DateTime  @default(now())
+
+  course      Course        @relation(fields: [courseId], references: [id])
+  section     Section?      @relation(fields: [sectionId], references: [id])
+  group       StudentGroup? @relation(fields: [groupId], references: [id])
+  createdBy   User          @relation("assignmentCreator", fields: [createdById], references: [id])
+  submissions Submission[]
+
+  @@index([courseId])
+}
+
+/// A named subset of a course's students (manual or performance-based), used to
+/// target assignments/tasks. A student may belong to multiple groups.
+model StudentGroup {
+  id        String   @id @default(cuid())
+  courseId  String
+  name      String
+  createdAt DateTime @default(now())
+
+  course      Course               @relation(fields: [courseId], references: [id])
+  members     StudentGroupMember[]
+  assignments Assignment[]
+
+  @@index([courseId])
+}
+
+model StudentGroupMember {
+  id        String @id @default(cuid())
+  groupId   String
+  studentId String
+
+  group   StudentGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  student User         @relation(fields: [studentId], references: [id])
+
+  @@unique([groupId, studentId])
+  @@index([studentId])
+}
+
+model Submission {
+  id           String    @id @default(cuid())
+  assignmentId String
+  studentId    String
+  content      String?   @db.Text
+  fileUrl      String?
+  submittedAt  DateTime  @default(now())
+  grade        Int?
+  feedback     String?   @db.Text
+  gradedById   String?
+  gradedAt     DateTime?
+
+  assignment Assignment @relation(fields: [assignmentId], references: [id])
+  student    User       @relation("submissionStudent", fields: [studentId], references: [id])
+
+  @@unique([assignmentId, studentId])
+  @@index([studentId])
 }
 
 model Enrollment {
@@ -80,6 +262,8 @@ model Enrollment {
   courseId  String
   studentId String
   createdAt DateTime @default(now())
+  /// When the student last tapped "Add to calendar" (proxy for reminder set).
+  reminderAddedAt DateTime?
 
   course  Course @relation(fields: [courseId], references: [id])
   student User   @relation(fields: [studentId], references: [id])
@@ -98,12 +282,28 @@ model LiveSession {
   startedAt   DateTime?
   endedAt     DateTime?
 
-  course   Course        @relation(fields: [courseId], references: [id])
-  section  Section?      @relation(fields: [sectionId], references: [id])
-  messages ChatMessage[]
-  quizzes  Quiz[]
+  course      Course        @relation(fields: [courseId], references: [id])
+  section     Section?      @relation(fields: [sectionId], references: [id])
+  messages    ChatMessage[]
+  quizzes     Quiz[]
+  attendances Attendance[]
+  assessment  Assessment?
 
   @@index([courseId, status])
+}
+
+/// One row per student who joined a live session — the attendance signal.
+model Attendance {
+  id        String   @id @default(cuid())
+  sessionId String
+  studentId String
+  joinedAt  DateTime @default(now())
+
+  session LiveSession @relation(fields: [sessionId], references: [id])
+  student User        @relation(fields: [studentId], references: [id])
+
+  @@unique([sessionId, studentId])
+  @@index([studentId])
 }
 
 model ChatMessage {
@@ -191,4 +391,138 @@ model Certificate {
   student User   @relation("certStudent", fields: [studentId], references: [id])
 
   @@unique([courseId, studentId])
+}
+
+/// A course document (PDF/DOCX) uploaded to ground AI question drafting. The
+/// extracted plain text is stored so drafting doesn't re-parse the file.
+model CourseDocument {
+  id            String   @id @default(cuid())
+  courseId      String
+  filename      String
+  storageKey    String // object-store key (R2 in prod, disk in dev)
+  mimeType      String
+  charCount     Int
+  extractedText String   @db.LongText
+  createdById   String
+  createdAt     DateTime @default(now())
+
+  course Course @relation(fields: [courseId], references: [id])
+
+  @@index([courseId])
+}
+
+// ---------- Adaptive assessment (class-end quiz → remediation) ----------
+// Deterministic loop: instructor authors a per-Section MC question bank + a
+// per-Section remediation-task bank. When a live session ends, an Assessment
+// freezes a set of questions; students answer async; grading is exact; missing
+// a Section auto-assigns that Section's remediation tasks. No LLM at runtime —
+// AI (roadmap) only drafts the two banks at authoring time.
+
+/// Instructor-authored multiple-choice question, tagged by Section (topic).
+model AssessmentQuestion {
+  id           String   @id @default(cuid())
+  courseId     String
+  sectionId    String
+  body         String   @db.Text
+  /// string[] — MySQL has no native array type
+  options      Json
+  correctIndex Int
+  /// Soft-delete flag; questions referenced by past assessments are never hard-deleted.
+  active       Boolean  @default(true)
+  createdById  String
+  createdAt    DateTime @default(now())
+
+  course    Course               @relation(fields: [courseId], references: [id])
+  section   Section              @relation(fields: [sectionId], references: [id])
+  responses AssessmentResponse[]
+
+  @@index([courseId, sectionId])
+}
+
+/// Pre-made work assigned to a student who misses a Section on an assessment.
+model RemediationTask {
+  id           String   @id @default(cuid())
+  courseId     String
+  sectionId    String
+  title        String
+  instructions String?  @db.Text
+  active       Boolean  @default(true)
+  createdById  String
+  createdAt    DateTime @default(now())
+
+  course   Course                @relation(fields: [courseId], references: [id])
+  section  Section               @relation(fields: [sectionId], references: [id])
+  assigned AssignedRemediation[]
+
+  @@index([courseId, sectionId])
+}
+
+/// One assessment instance, materialised when a live session ends. The set of
+/// questions is frozen at creation (questionIds) so a later bank edit can't
+/// change a live assessment.
+model Assessment {
+  id          String   @id @default(cuid())
+  courseId    String
+  sessionId   String   @unique
+  sectionId   String?  // topic the ended session covered, if any
+  /// Frozen string[] of AssessmentQuestion ids, in presentation order.
+  questionIds Json
+  createdAt   DateTime @default(now())
+
+  course   Course              @relation(fields: [courseId], references: [id])
+  session  LiveSession         @relation(fields: [sessionId], references: [id])
+  attempts AssessmentAttempt[]
+
+  @@index([courseId])
+}
+
+/// One student's run at an assessment. Scored deterministically on submit.
+model AssessmentAttempt {
+  id           String    @id @default(cuid())
+  assessmentId String
+  studentId    String
+  startedAt    DateTime  @default(now())
+  submittedAt  DateTime?
+  score        Int? // correct answers
+  total        Int? // questions in the assessment
+
+  assessment Assessment           @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  student    User                 @relation(fields: [studentId], references: [id])
+  responses  AssessmentResponse[]
+
+  @@unique([assessmentId, studentId])
+  @@index([studentId])
+}
+
+model AssessmentResponse {
+  id          String  @id @default(cuid())
+  attemptId   String
+  questionId  String
+  answerIndex Int
+  isCorrect   Boolean
+
+  attempt  AssessmentAttempt  @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  question AssessmentQuestion @relation(fields: [questionId], references: [id])
+
+  @@unique([attemptId, questionId])
+  @@index([questionId])
+}
+
+/// A remediation task routed to a student because they missed its Section.
+model AssignedRemediation {
+  id          String            @id @default(cuid())
+  studentId   String
+  taskId      String
+  /// The attempt that triggered this (also dedupes re-runs).
+  attemptId   String
+  sectionId   String // denormalized: the missed topic
+  status      RemediationStatus @default(PENDING)
+  createdAt   DateTime          @default(now())
+  completedAt DateTime?
+
+  student User            @relation(fields: [studentId], references: [id])
+  task    RemediationTask @relation(fields: [taskId], references: [id])
+
+  @@unique([attemptId, taskId])
+  @@index([studentId, status])
 }
