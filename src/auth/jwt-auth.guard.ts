@@ -1,24 +1,33 @@
 import {
   CanActivate,
   ExecutionContext,
+  ForbiddenException,
   Injectable,
   SetMetadata,
   UnauthorizedException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
+import { UserStatus } from '@prisma/client';
 import type { Request } from 'express';
+import { AuthCacheService } from './auth-cache.service';
 import { JwtPayload } from './jwt-payload';
 
 export const IS_PUBLIC_KEY = 'isPublic';
 /** Marks a route as accessible without a token. */
 export const Public = () => SetMetadata(IS_PUBLIC_KEY, true);
 
+export const ALLOW_UNVERIFIED_KEY = 'allowUnverified';
+/** Marks a route reachable by a logged-in user whose email isn't verified yet
+ *  (the verification endpoints themselves, and /auth/me). */
+export const AllowUnverified = () => SetMetadata(ALLOW_UNVERIFIED_KEY, true);
+
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
   constructor(
     private readonly jwt: JwtService,
     private readonly reflector: Reflector,
+    private readonly authCache: AuthCacheService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -33,12 +42,34 @@ export class JwtAuthGuard implements CanActivate {
     if (scheme !== 'Bearer' || !token) {
       throw new UnauthorizedException('Missing bearer token');
     }
+    let payload: JwtPayload;
     try {
-      const payload = await this.jwt.verifyAsync<JwtPayload>(token);
-      (req as Request & { user: JwtPayload }).user = payload;
-      return true;
+      payload = await this.jwt.verifyAsync<JwtPayload>(token);
     } catch {
       throw new UnauthorizedException('Invalid or expired token');
     }
+    // The token is stateless (7d), so a disabled/deleted account must be
+    // rejected here — not just at login — to end any active session. Cached in
+    // Redis (invalidated on disable/verify) so this isn't a per-request DB hit.
+    const account = await this.authCache.getState(payload.sub);
+    if (!account || account.status === UserStatus.DISABLED) {
+      throw new UnauthorizedException('This account has been disabled');
+    }
+
+    // Hard email-verification gate: unverified users can only reach the
+    // verification endpoints (and /auth/me) until they confirm their address.
+    const allowUnverified = this.reflector.getAllAndOverride<boolean>(
+      ALLOW_UNVERIFIED_KEY,
+      [context.getHandler(), context.getClass()],
+    );
+    if (!account.emailVerified && !allowUnverified) {
+      throw new ForbiddenException('Email not verified');
+    }
+
+    (req as Request & { user: JwtPayload }).user = {
+      ...payload,
+      emailVerified: account.emailVerified,
+    };
+    return true;
   }
 }

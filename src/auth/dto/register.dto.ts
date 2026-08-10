@@ -1,6 +1,6 @@
-import { IsEmail, IsEnum, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
-import { Role } from '@prisma/client';
+import { IsEmail, IsNotEmpty, IsString, MaxLength, MinLength } from 'class-validator';
 
+/** Student/instructor registration — always via an organization invite link. */
 export class RegisterDto {
   @IsString()
   @MinLength(2)
@@ -15,7 +15,8 @@ export class RegisterDto {
   @MaxLength(72) // bcrypt input limit
   password!: string;
 
-  @IsOptional()
-  @IsEnum(Role)
-  role?: Role; // defaults to STUDENT; instructor onboarding flow can come later
+  /** The invite token from the join link; determines org + role. */
+  @IsString()
+  @IsNotEmpty()
+  inviteToken!: string;
 }

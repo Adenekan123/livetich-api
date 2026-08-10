@@ -6,4 +6,6 @@ export interface JwtPayload {
   role: Role;
   name: string;
   email: string;
+  organizationId: string | null; // tenant the user belongs to
+  emailVerified: boolean; // reissued on verify so it stays fresh in the token
 }
