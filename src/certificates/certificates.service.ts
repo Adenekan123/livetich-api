@@ -8,6 +8,7 @@ import {
 import { Prisma } from '@prisma/client';
 import { Queue } from 'bullmq';
 import { randomBytes } from 'node:crypto';
+import type { JwtPayload } from '../auth/jwt-payload';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   CERTIFICATES_QUEUE,
@@ -23,16 +24,9 @@ export class CertificatesService {
     private readonly queue: Queue<GenerateCertificateJob>,
   ) {}
 
-  /** Instructor issues a certificate; the PDF is rendered async by the worker. */
-  async issue(instructorId: string, dto: IssueCertificateDto) {
-    const course = await this.prisma.course.findUnique({
-      where: { id: dto.courseId },
-      select: { id: true, instructorId: true },
-    });
-    if (!course) throw new NotFoundException('Course not found');
-    if (course.instructorId !== instructorId) {
-      throw new ForbiddenException('You do not own this course');
-    }
+  /** Org admin issues a certificate; the PDF is rendered async by the worker. */
+  async issue(user: JwtPayload, dto: IssueCertificateDto) {
+    await this.assertOrgCourse(user, dto.courseId);
 
     const enrollment = await this.prisma.enrollment.findUnique({
       where: {
@@ -49,7 +43,7 @@ export class CertificatesService {
         data: {
           courseId: dto.courseId,
           studentId: dto.studentId,
-          issuedById: instructorId,
+          issuedById: user.sub,
           verificationCode: randomBytes(9).toString('base64url'),
         },
       });
@@ -77,15 +71,8 @@ export class CertificatesService {
     });
   }
 
-  async listForCourse(instructorId: string, courseId: string) {
-    const course = await this.prisma.course.findUnique({
-      where: { id: courseId },
-      select: { instructorId: true },
-    });
-    if (!course) throw new NotFoundException('Course not found');
-    if (course.instructorId !== instructorId) {
-      throw new ForbiddenException('You do not own this course');
-    }
+  async listForCourse(user: JwtPayload, courseId: string) {
+    await this.assertOrgCourse(user, courseId);
     return this.prisma.certificate.findMany({
       where: { courseId },
       include: { student: { select: { id: true, name: true, email: true } } },
@@ -113,7 +100,7 @@ export class CertificatesService {
       verificationCode: cert.verificationCode,
       student: cert.student.name,
       course: cert.course.title,
-      instructor: cert.course.instructor.name,
+      instructor: cert.course.instructor?.name ?? 'Course instructor',
       issuedAt: cert.issuedAt,
     };
   }
@@ -132,5 +119,19 @@ export class CertificatesService {
       throw new NotFoundException('PDF not generated yet — try again shortly');
     }
     return cert;
+  }
+
+  /** Ensures the course exists and belongs to the caller's organization. */
+  private async assertOrgCourse(user: JwtPayload, courseId: string) {
+    if (!user.organizationId) {
+      throw new ForbiddenException('No organization on this account');
+    }
+    const course = await this.prisma.course.findUnique({
+      where: { id: courseId },
+      select: { organizationId: true },
+    });
+    if (!course || course.organizationId !== user.organizationId) {
+      throw new NotFoundException('Course not found');
+    }
   }
 }

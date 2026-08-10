@@ -27,9 +27,9 @@ export class CertificatesController {
   ) {}
 
   @Post()
-  @Roles(Role.INSTRUCTOR)
+  @Roles(Role.ORG_ADMIN)
   issue(@CurrentUser() user: JwtPayload, @Body() dto: IssueCertificateDto) {
-    return this.certificates.issue(user.sub, dto);
+    return this.certificates.issue(user, dto);
   }
 
   @Get('mine')
@@ -39,12 +39,12 @@ export class CertificatesController {
   }
 
   @Get('course/:courseId')
-  @Roles(Role.INSTRUCTOR)
+  @Roles(Role.ORG_ADMIN)
   forCourse(
     @CurrentUser() user: JwtPayload,
     @Param('courseId') courseId: string,
   ) {
-    return this.certificates.listForCourse(user.sub, courseId);
+    return this.certificates.listForCourse(user, courseId);
   }
 
   /** QR-code target — no auth so anyone can scan and verify. */

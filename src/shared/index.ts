@@ -3,9 +3,12 @@
 
 // ---------- Domain ----------
 
-export type Role = 'INSTRUCTOR' | 'STUDENT';
+export type Role = 'INSTRUCTOR' | 'STUDENT' | 'ORG_ADMIN';
 
 export type SessionStatus = 'SCHEDULED' | 'LIVE' | 'ENDED';
+
+/** Which surface the class is looking at. The instructor drives it for everyone. */
+export type StageView = 'video' | 'board';
 
 export type PointsReason =
   | 'QUIZ_CORRECT'
@@ -84,6 +87,8 @@ export interface ClientToServerEvents {
   'student:pick-random': (p: { sessionId: string }) => void;
   'screen-share:grant': (p: { sessionId: string; userId: string }) => void;
   'screen-share:revoke': (p: { sessionId: string; userId: string }) => void;
+  /** Instructor switches the class between video and chalkboard for everyone. */
+  'view:change': (p: { sessionId: string; view: StageView }) => void;
 }
 
 export interface ServerToClientEvents {
@@ -95,6 +100,9 @@ export interface ServerToClientEvents {
   'chat:locked': (p: { sessionId: string; locked: boolean }) => void;
 
   'hands:update': (p: { sessionId: string; raised: RoomUser[] }) => void;
+
+  /** The active surface, driven by the instructor; students follow. */
+  'view:changed': (p: { sessionId: string; view: StageView }) => void;
 
   'leaderboard:update': (p: {
     sessionId: string;

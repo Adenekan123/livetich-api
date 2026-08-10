@@ -24,6 +24,31 @@ export class SessionsController {
     return this.sessions.listForCourse(courseId);
   }
 
+  /** Public catalog feed — live + upcoming sessions across all courses.
+   *  Declared before :id so "browse" isn't matched as a session id. */
+  @Public()
+  @Get('browse')
+  browse() {
+    return this.sessions.browse();
+  }
+
+  /** Join-button state for a course (generic, not user-specific).
+   *  Declared before :id so "course" isn't matched as a session id. */
+  @Public()
+  @Get('course/:courseId/status')
+  courseStatus(@Param('courseId') courseId: string) {
+    return this.sessions.courseSessionStatus(courseId);
+  }
+
+  /** Enter today's live session for a course — materialises it on first join. */
+  @Post('course/:courseId/join')
+  joinCourse(
+    @CurrentUser() user: JwtPayload,
+    @Param('courseId') courseId: string,
+  ) {
+    return this.sessions.resolveCourseSession(user, courseId);
+  }
+
   @Public()
   @Get(':id')
   get(@Param('id') id: string) {

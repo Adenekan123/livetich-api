@@ -46,7 +46,7 @@ export class CertificatesProcessor extends WorkerHost {
     const pdf = await renderCertificatePdf({
       studentName: cert.student.name,
       courseTitle: cert.course.title,
-      instructorName: cert.course.instructor.name,
+      instructorName: cert.course.instructor?.name ?? 'Course instructor',
       issuedAt: cert.issuedAt,
       verificationCode: cert.verificationCode,
       verifyUrl: `${this.verifyBase}/${cert.verificationCode}`,

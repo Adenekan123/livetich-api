@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import Redis from 'ioredis';
-import type { BuzzerState, RoomUser } from '../shared';
+import type { BuzzerState, RoomUser, StageView } from '../shared';
 import { REDIS } from '../redis/redis.module';
 
 /**
@@ -43,6 +43,22 @@ export class RoomStateService {
 
   async isChatLocked(sessionId: string): Promise<boolean> {
     return (await this.redis.exists(this.k(sessionId, 'chatlock'))) === 1;
+  }
+
+  // ---------- Active stage view (instructor-driven) ----------
+
+  async setView(sessionId: string, view: StageView) {
+    await this.redis.set(
+      this.k(sessionId, 'view'),
+      view,
+      'EX',
+      RoomStateService.TTL,
+    );
+  }
+
+  async getView(sessionId: string): Promise<StageView> {
+    const v = await this.redis.get(this.k(sessionId, 'view'));
+    return v === 'board' ? 'board' : 'video';
   }
 
   // ---------- Raised hands ----------

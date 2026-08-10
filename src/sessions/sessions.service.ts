@@ -7,10 +7,22 @@ import {
 import { Role, SessionStatus } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import type { JwtPayload } from '../auth/jwt-payload';
+import { AssessmentService } from '../assessment/assessment.service';
 import { CoursesService } from '../courses/courses.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateSessionDto } from './dto/create-session.dto';
 import { LivekitService } from './livekit.service';
+import { resolveJoinWindow } from './session-schedule';
+
+const COURSE_SCHEDULE_SELECT = {
+  id: true,
+  instructorId: true,
+  startDate: true,
+  durationWeeks: true,
+  meetingDays: true,
+  meetingTime: true,
+  timezone: true,
+} as const;
 
 @Injectable()
 export class SessionsService {
@@ -18,6 +30,7 @@ export class SessionsService {
     private readonly prisma: PrismaService,
     private readonly courses: CoursesService,
     private readonly livekit: LivekitService,
+    private readonly assessment: AssessmentService,
   ) {}
 
   async schedule(instructorId: string, dto: CreateSessionDto) {
@@ -44,6 +57,37 @@ export class SessionsService {
       where: { courseId },
       orderBy: { scheduledAt: 'desc' },
       include: { section: { select: { id: true, title: true, order: true } } },
+    });
+  }
+
+  /**
+   * Public catalog feed for the browse page: every live and upcoming session
+   * across all courses, with the course + instructor context each tile needs.
+   * Live first (most recently started), then upcoming (soonest scheduled).
+   */
+  browse() {
+    return this.prisma.liveSession.findMany({
+      where: { status: { in: [SessionStatus.LIVE, SessionStatus.SCHEDULED] } },
+      orderBy: [{ startedAt: 'desc' }, { scheduledAt: 'asc' }],
+      include: {
+        section: { select: { id: true, title: true, order: true } },
+        course: {
+          select: {
+            id: true,
+            title: true,
+            description: true,
+            category: true,
+            level: true,
+            startDate: true,
+            durationWeeks: true,
+            meetingDays: true,
+            meetingTime: true,
+            timezone: true,
+            instructor: { select: { id: true, name: true } },
+            _count: { select: { enrollments: true } },
+          },
+        },
+      },
     });
   }
 
@@ -81,15 +125,107 @@ export class SessionsService {
     if (session.status !== SessionStatus.LIVE) {
       throw new ConflictException(`Cannot end a ${session.status} session`);
     }
-    return this.prisma.liveSession.update({
+    const ended = await this.prisma.liveSession.update({
       where: { id },
       data: { status: SessionStatus.ENDED, endedAt: new Date() },
     });
+    // Materialise the class-end assessment (best-effort; no question bank → no-op).
+    void this.assessment
+      .createForSession({
+        id: ended.id,
+        courseId: ended.courseId,
+        sectionId: ended.sectionId,
+      })
+      .catch(() => {});
+    return ended;
   }
 
   /**
-   * Join token. Instructors (owner only) can join while SCHEDULED to set up;
-   * students must be enrolled and the session must be LIVE.
+   * The program cadence drives sessions now: on a scheduled meeting day (from
+   * the meeting time onward) anyone entitled can Join, and today's occurrence is
+   * materialised on first entry. The instructor arriving flips it LIVE; students
+   * may enter beforehand and see the "instructor will join soon" board.
+   */
+  async resolveCourseSession(user: JwtPayload, courseId: string) {
+    const course = await this.prisma.course.findUnique({
+      where: { id: courseId },
+      select: COURSE_SCHEDULE_SELECT,
+    });
+    if (!course) throw new NotFoundException('Course not found');
+
+    const window = resolveJoinWindow(course);
+    if (!window.current || !window.joinableNow) {
+      throw new ConflictException('No live session scheduled right now');
+    }
+
+    const isOwner =
+      user.role === Role.INSTRUCTOR && course.instructorId === user.sub;
+    if (user.role === Role.INSTRUCTOR && !isOwner) {
+      throw new ForbiddenException('Not your course');
+    }
+    if (user.role === Role.STUDENT) {
+      const enrollment = await this.prisma.enrollment.findUnique({
+        where: { courseId_studentId: { courseId, studentId: user.sub } },
+        select: { id: true },
+      });
+      if (!enrollment) throw new ForbiddenException('Not enrolled');
+    } else if (!isOwner) {
+      throw new ForbiddenException('Not a participant of this session');
+    }
+
+    const room = `course-${courseId}-${window.current.dateKey}`;
+    // Idempotent on the unique room name — the first join today creates the row.
+    const session = await this.prisma.liveSession.upsert({
+      where: { livekitRoom: room },
+      create: {
+        courseId,
+        scheduledAt: window.current.scheduledAt,
+        livekitRoom: room,
+      },
+      update: {},
+    });
+    if (session.status === SessionStatus.ENDED) {
+      throw new ConflictException('Session has ended');
+    }
+    // The instructor arriving is what makes the room live.
+    if (isOwner && session.status === SessionStatus.SCHEDULED) {
+      await this.prisma.liveSession.update({
+        where: { id: session.id },
+        data: { status: SessionStatus.LIVE, startedAt: new Date() },
+      });
+    }
+    return { sessionId: session.id };
+  }
+
+  /** Button state for the course page: can I join now, and when is the next meeting. */
+  async courseSessionStatus(courseId: string) {
+    const course = await this.prisma.course.findUnique({
+      where: { id: courseId },
+      select: COURSE_SCHEDULE_SELECT,
+    });
+    if (!course) throw new NotFoundException('Course not found');
+
+    const window = resolveJoinWindow(course);
+    let isLive = false;
+    if (window.current) {
+      const room = `course-${courseId}-${window.current.dateKey}`;
+      const today = await this.prisma.liveSession.findUnique({
+        where: { livekitRoom: room },
+        select: { status: true },
+      });
+      isLive = today?.status === SessionStatus.LIVE;
+    }
+    return {
+      joinableNow: window.joinableNow,
+      isLive,
+      nextAt: (window.current ?? window.next)?.scheduledAt ?? null,
+    };
+  }
+
+  /**
+   * Join token. Instructors (owner only) may enter their room; enrolled students
+   * may enter any non-ended session — if the instructor hasn't arrived yet the
+   * classroom shows a waiting board until it flips LIVE.
    */
   async joinToken(user: JwtPayload, id: string) {
     const session = await this.prisma.liveSession.findUnique({
@@ -106,9 +242,6 @@ export class SessionsService {
         throw new ForbiddenException('Not your session');
       }
     } else {
-      if (session.status !== SessionStatus.LIVE) {
-        throw new ConflictException('Session is not live yet');
-      }
       const enrollment = await this.prisma.enrollment.findUnique({
         where: {
           courseId_studentId: {
@@ -119,6 +252,15 @@ export class SessionsService {
         select: { id: true },
       });
       if (!enrollment) throw new ForbiddenException('Not enrolled');
+
+      // Record attendance the first time this student joins the live session.
+      await this.prisma.attendance.upsert({
+        where: {
+          sessionId_studentId: { sessionId: id, studentId: user.sub },
+        },
+        create: { sessionId: id, studentId: user.sub },
+        update: {},
+      });
     }
 
     const token = await this.livekit.mintJoinToken({

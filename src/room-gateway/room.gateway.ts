@@ -9,8 +9,9 @@ import {
   WebSocketGateway,
   WebSocketServer,
 } from '@nestjs/websockets';
-import { PointsReason, Prisma, Role, SessionStatus } from '@prisma/client';
+import { PointsReason, Prisma, Role, SessionStatus, UserStatus } from '@prisma/client';
 import type { Server, Socket } from 'socket.io';
+import { AuthCacheService } from '../auth/auth-cache.service';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { PointsService, POINTS_BUZZER_WIN } from '../points/points.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -62,6 +63,7 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly state: RoomStateService,
     private readonly points: PointsService,
     private readonly livekit: LivekitService,
+    private readonly authCache: AuthCacheService,
   ) {}
 
   // ---------- Connection lifecycle ----------
@@ -70,13 +72,22 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const token =
       (client.handshake.auth?.token as string | undefined) ??
       client.handshake.headers.authorization?.split(' ')[1];
+    let user: JwtPayload;
     try {
-      client.data.user = await this.jwt.verifyAsync<JwtPayload>(token ?? '');
-      client.data.sessionIds = new Set();
+      user = await this.jwt.verifyAsync<JwtPayload>(token ?? '');
     } catch {
       client.emit('error', { code: 'UNAUTHORIZED', message: 'Invalid token' });
-      client.disconnect(true);
+      return client.disconnect(true);
     }
+    // Same gate as the HTTP guard: disabled or unverified accounts can't hold a
+    // live socket (the token is long-lived, so re-check against current state).
+    const account = await this.authCache.getState(user.sub);
+    if (!account || account.status === UserStatus.DISABLED || !account.emailVerified) {
+      client.emit('error', { code: 'FORBIDDEN', message: 'Account not permitted' });
+      return client.disconnect(true);
+    }
+    client.data.user = user;
+    client.data.sessionIds = new Set();
   }
 
   async handleDisconnect(client: RoomSocket) {
@@ -134,6 +145,10 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     client.emit('chat:locked', {
       sessionId: p.sessionId,
       locked: await this.state.isChatLocked(p.sessionId),
+    });
+    client.emit('view:changed', {
+      sessionId: p.sessionId,
+      view: await this.state.getView(p.sessionId),
     });
     await this.broadcastHands(p.sessionId, client);
     await this.sendChatHistory(p.sessionId, client);
@@ -214,6 +229,19 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.server
       .to(p.sessionId)
       .emit('chat:locked', { sessionId: p.sessionId, locked: p.locked });
+  }
+
+  @SubscribeMessage('view:change')
+  async onViewChange(
+    @ConnectedSocket() client: RoomSocket,
+    @MessageBody() p: { sessionId: string; view: 'video' | 'board' },
+  ) {
+    if (!(await this.isOwner(client, p.sessionId))) return;
+    const view = p.view === 'board' ? 'board' : 'video';
+    await this.state.setView(p.sessionId, view);
+    this.server
+      .to(p.sessionId)
+      .emit('view:changed', { sessionId: p.sessionId, view });
   }
 
   // ---------- Raised hands ----------

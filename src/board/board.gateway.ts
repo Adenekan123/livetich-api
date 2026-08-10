@@ -8,8 +8,9 @@ import {
   WebSocketGateway,
   WebSocketServer,
 } from '@nestjs/websockets';
-import { Role, SessionStatus } from '@prisma/client';
+import { Role, SessionStatus, UserStatus } from '@prisma/client';
 import type { Server, Socket } from 'socket.io';
+import { AuthCacheService } from '../auth/auth-cache.service';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { PrismaService } from '../prisma/prisma.service';
 import type {
@@ -51,19 +52,27 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly jwt: JwtService,
     private readonly prisma: PrismaService,
     private readonly docs: BoardDocService,
+    private readonly authCache: AuthCacheService,
   ) {}
 
   async handleConnection(client: BoardSocket) {
     const token =
       (client.handshake.auth?.token as string | undefined) ??
       client.handshake.headers.authorization?.split(' ')[1];
+    let user: JwtPayload;
     try {
-      client.data.user = await this.jwt.verifyAsync<JwtPayload>(token ?? '');
-      client.data.sessionIds = new Set();
+      user = await this.jwt.verifyAsync<JwtPayload>(token ?? '');
     } catch {
       client.emit('error', { code: 'UNAUTHORIZED', message: 'Invalid token' });
-      client.disconnect(true);
+      return client.disconnect(true);
     }
+    const account = await this.authCache.getState(user.sub);
+    if (!account || account.status === UserStatus.DISABLED || !account.emailVerified) {
+      client.emit('error', { code: 'FORBIDDEN', message: 'Account not permitted' });
+      return client.disconnect(true);
+    }
+    client.data.user = user;
+    client.data.sessionIds = new Set();
   }
 
   async handleDisconnect(client: BoardSocket) {
