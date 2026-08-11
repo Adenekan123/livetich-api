@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ForbiddenException,
+  Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -8,15 +9,23 @@ import { Prisma, Role } from '@prisma/client';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { CoursesService } from '../courses/courses.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { OBJECT_STORAGE } from '../storage/object-storage';
+import type { ObjectStorage } from '../storage/object-storage';
 import { CreateAssignmentDto } from './dto/create-assignment.dto';
 import { GradeSubmissionDto } from './dto/grade-submission.dto';
 import { SubmitAssignmentDto } from './dto/submit-assignment.dto';
+
+/** What students may attach: recitation audio, plus images and PDFs. */
+const ALLOWED_UPLOAD_PREFIXES = ['audio/', 'image/'];
+const ALLOWED_UPLOAD_EXACT = ['application/pdf'];
+const MAX_UPLOAD_BYTES = 30 * 1024 * 1024; // 30 MB
 
 @Injectable()
 export class AssignmentsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly courses: CoursesService,
+    @Inject(OBJECT_STORAGE) private readonly storage: ObjectStorage,
   ) {}
 
   /** Instructor (assigned) or org admin creates coursework. */
@@ -36,10 +45,18 @@ export class AssignmentsService {
       });
       if (!group) throw new NotFoundException('Group not found in course');
     }
+    if (dto.sessionId) {
+      const session = await this.prisma.liveSession.findFirst({
+        where: { id: dto.sessionId, courseId },
+        select: { id: true },
+      });
+      if (!session) throw new NotFoundException('Session not found in course');
+    }
     return this.prisma.assignment.create({
       data: {
         courseId,
         sectionId: dto.sectionId,
+        sessionId: dto.sessionId ?? null,
         groupId: dto.groupId ?? null,
         title: dto.title,
         instructions: dto.instructions,
@@ -75,6 +92,7 @@ export class AssignmentsService {
       orderBy: [{ dueAt: 'asc' }, { createdAt: 'desc' }],
       include: {
         group: { select: { id: true, name: true } },
+        session: { select: { id: true, scheduledAt: true, status: true } },
         _count: { select: { submissions: true } },
       },
     });
@@ -101,6 +119,75 @@ export class AssignmentsService {
     }));
   }
 
+  /**
+   * Manager dashboard feed: every assignment with its target audience split
+   * into who has submitted (with their submission + grade) and who is missing.
+   * Powers the Assignment Lab's progress bars, inline grading and roster gaps.
+   */
+  async courseTracking(user: JwtPayload, courseId: string) {
+    await this.courses.assertCanManageCourse(user, courseId);
+
+    const studentSelect = { id: true, name: true, email: true } as const;
+    const [assignments, enrollments] = await Promise.all([
+      this.prisma.assignment.findMany({
+        where: { courseId },
+        orderBy: [{ dueAt: 'asc' }, { createdAt: 'desc' }],
+        include: {
+          group: {
+            select: {
+              id: true,
+              name: true,
+              members: { select: { student: { select: studentSelect } } },
+            },
+          },
+          session: { select: { id: true, scheduledAt: true, status: true } },
+          submissions: {
+            include: { student: { select: studentSelect } },
+            orderBy: { submittedAt: 'desc' },
+          },
+        },
+      }),
+      this.prisma.enrollment.findMany({
+        where: { courseId },
+        select: { student: { select: studentSelect } },
+        orderBy: { student: { name: 'asc' } },
+      }),
+    ]);
+
+    const classRoster = enrollments.map((e) => e.student);
+
+    return assignments.map(({ submissions, group, ...meta }) => {
+      const audience = group ? group.members.map((m) => m.student) : classRoster;
+      const audienceIds = new Set(audience.map((s) => s.id));
+
+      // Only submissions from students still in the target audience count.
+      const submitted = submissions
+        .filter((s) => audienceIds.has(s.studentId))
+        .map((s) => ({
+          submissionId: s.id,
+          student: s.student,
+          content: s.content,
+          fileUrl: s.fileUrl,
+          fileMimeType: s.fileMimeType,
+          submittedAt: s.submittedAt,
+          grade: s.grade,
+          feedback: s.feedback,
+        }));
+      const submittedIds = new Set(submitted.map((s) => s.student.id));
+      const missing = audience.filter((s) => !submittedIds.has(s.id));
+
+      return {
+        ...meta,
+        group: group ? { id: group.id, name: group.name } : null,
+        audienceCount: audience.length,
+        submittedCount: submitted.length,
+        gradedCount: submitted.filter((s) => s.grade != null).length,
+        submitted,
+        missing,
+      };
+    });
+  }
+
   /** Student submits (or resubmits) — resubmission clears any prior grade. */
   async submit(
     user: JwtPayload,
@@ -110,6 +197,104 @@ export class AssignmentsService {
     if (!dto.content?.trim() && !dto.fileUrl?.trim()) {
       throw new BadRequestException('Provide submission text or a file link');
     }
+    await this.assertCanSubmit(user, assignmentId);
+
+    const data = {
+      content: dto.content ?? null,
+      fileUrl: dto.fileUrl ?? null,
+      fileMimeType: null,
+      submittedAt: new Date(),
+      grade: null,
+      feedback: null,
+      gradedById: null,
+      gradedAt: null,
+    };
+    return this.prisma.submission.upsert({
+      where: {
+        assignmentId_studentId: { assignmentId, studentId: user.sub },
+      },
+      create: { assignmentId, studentId: user.sub, ...data },
+      update: data,
+    });
+  }
+
+  /**
+   * Student uploads a blob (recitation audio, image or PDF) as their
+   * submission. Stored in object storage under a per-submission key; the
+   * served URL is proxied by the web app so playback stays authenticated.
+   */
+  async uploadSubmission(
+    user: JwtPayload,
+    assignmentId: string,
+    file?: { buffer: Buffer; mimetype: string; size: number },
+  ) {
+    if (!file) throw new BadRequestException('No file received');
+    const mime = file.mimetype;
+    const allowed =
+      ALLOWED_UPLOAD_PREFIXES.some((p) => mime.startsWith(p)) ||
+      ALLOWED_UPLOAD_EXACT.includes(mime);
+    if (!allowed) {
+      throw new BadRequestException(`Unsupported file type: ${mime}`);
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      throw new BadRequestException('File is larger than 30 MB');
+    }
+    await this.assertCanSubmit(user, assignmentId);
+
+    // Upsert first to obtain a stable id, then store the blob under it.
+    const base = {
+      content: null,
+      submittedAt: new Date(),
+      grade: null,
+      feedback: null,
+      gradedById: null,
+      gradedAt: null,
+      fileMimeType: mime,
+    };
+    const submission = await this.prisma.submission.upsert({
+      where: {
+        assignmentId_studentId: { assignmentId, studentId: user.sub },
+      },
+      create: { assignmentId, studentId: user.sub, fileUrl: '', ...base },
+      update: { fileUrl: '', ...base },
+    });
+
+    await this.storage.put(submissionKey(submission.id), file.buffer, mime);
+
+    return this.prisma.submission.update({
+      where: { id: submission.id },
+      data: { fileUrl: `/api/files/submission/${submission.id}` },
+    });
+  }
+
+  /** Streams a submission's uploaded blob to its owner or a course manager. */
+  async streamSubmissionFile(user: JwtPayload, submissionId: string) {
+    const submission = await this.prisma.submission.findUnique({
+      where: { id: submissionId },
+      select: {
+        id: true,
+        studentId: true,
+        fileMimeType: true,
+        assignment: { select: { courseId: true } },
+      },
+    });
+    if (!submission || !submission.fileMimeType) {
+      throw new NotFoundException('No uploaded file for this submission');
+    }
+    if (submission.studentId !== user.sub) {
+      // Not the owner — must be able to manage the course.
+      await this.courses.assertCanManageCourse(
+        user,
+        submission.assignment.courseId,
+      );
+    }
+    const stream = await this.storage.getStream(submissionKey(submission.id));
+    if (!stream) throw new NotFoundException('File not found');
+    return { stream, mime: submission.fileMimeType };
+  }
+
+  /** Shared submission gate: enrolled, and (for group work) a group member. */
+  private async assertCanSubmit(user: JwtPayload, assignmentId: string) {
     const assignment = await this.prisma.assignment.findUnique({
       where: { id: assignmentId },
       select: { id: true, courseId: true, groupId: true },
@@ -142,23 +327,7 @@ export class AssignmentsService {
         throw new ForbiddenException('This assignment is not assigned to you');
       }
     }
-
-    const data = {
-      content: dto.content ?? null,
-      fileUrl: dto.fileUrl ?? null,
-      submittedAt: new Date(),
-      grade: null,
-      feedback: null,
-      gradedById: null,
-      gradedAt: null,
-    };
-    return this.prisma.submission.upsert({
-      where: {
-        assignmentId_studentId: { assignmentId, studentId: user.sub },
-      },
-      create: { assignmentId, studentId: user.sub, ...data },
-      update: data,
-    });
+    return assignment;
   }
 
   /** Instructor/admin: the roster of submissions for one assignment. */
@@ -214,4 +383,10 @@ export class AssignmentsService {
     await this.courses.assertCanManageCourse(user, assignment.courseId);
     return assignment;
   }
+}
+
+/** Object-storage key for a submission's uploaded blob (extension-agnostic;
+ *  the MIME type is stored on the row and set as the content type on serve). */
+function submissionKey(submissionId: string): string {
+  return `submissions/${submissionId}`;
 }

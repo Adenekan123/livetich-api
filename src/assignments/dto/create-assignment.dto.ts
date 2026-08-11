@@ -34,6 +34,11 @@ export class CreateAssignmentDto {
   @IsString()
   sectionId?: string;
 
+  /** Tie this coursework to a live session (e.g. homework from that class). */
+  @IsOptional()
+  @IsString()
+  sessionId?: string;
+
   /** Target a single group; omit for the whole class. */
   @IsOptional()
   @IsString()

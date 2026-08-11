@@ -1,4 +1,15 @@
-import { Body, Controller, Get, Param, Patch, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Patch,
+  Post,
+  StreamableFile,
+  UploadedFile,
+  UseInterceptors,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { Role } from '@prisma/client';
 import { CurrentUser } from '../auth/current-user.decorator';
 import type { JwtPayload } from '../auth/jwt-payload';
@@ -7,6 +18,13 @@ import { AssignmentsService } from './assignments.service';
 import { CreateAssignmentDto } from './dto/create-assignment.dto';
 import { GradeSubmissionDto } from './dto/grade-submission.dto';
 import { SubmitAssignmentDto } from './dto/submit-assignment.dto';
+
+/** Multer file shape (subset) — avoids a hard dependency on Express types. */
+interface UploadedBlob {
+  buffer: Buffer;
+  mimetype: string;
+  size: number;
+}
 
 @Controller()
 export class AssignmentsController {
@@ -28,6 +46,15 @@ export class AssignmentsController {
     return this.assignments.listForCourse(user, courseId);
   }
 
+  /** Manager dashboard: assignments with submitted vs missing rosters. */
+  @Get('courses/:courseId/assignments/tracking')
+  tracking(
+    @CurrentUser() user: JwtPayload,
+    @Param('courseId') courseId: string,
+  ) {
+    return this.assignments.courseTracking(user, courseId);
+  }
+
   @Get('assignments/:id/submissions')
   submissions(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
     return this.assignments.listSubmissions(user, id);
@@ -43,6 +70,31 @@ export class AssignmentsController {
     @Body() dto: SubmitAssignmentDto,
   ) {
     return this.assignments.submit(user, id, dto);
+  }
+
+  /** Student uploads a recitation audio (or image/PDF) as their submission. */
+  @Post('assignments/:id/submissions/upload')
+  @Roles(Role.STUDENT)
+  @UseInterceptors(FileInterceptor('file'))
+  uploadSubmission(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @UploadedFile() file: UploadedBlob,
+  ) {
+    return this.assignments.uploadSubmission(user, id, file);
+  }
+
+  /** Streams a submission's uploaded blob (owner or course manager only). */
+  @Get('files/submission/:id')
+  async submissionFile(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+  ) {
+    const { stream, mime } = await this.assignments.streamSubmissionFile(
+      user,
+      id,
+    );
+    return new StreamableFile(stream, { type: mime });
   }
 
   // ---- Grading ----
