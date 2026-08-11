@@ -246,7 +246,12 @@ export class CoursesService {
     const order = dto.order ?? (await this.nextSectionOrder(courseId));
     try {
       return await this.prisma.section.create({
-        data: { courseId, title: dto.title, order },
+        data: {
+          courseId,
+          title: dto.title,
+          description: dto.description?.trim() || null,
+          order,
+        },
       });
     } catch (e) {
       throw this.mapDuplicateOrder(e, courseId);
