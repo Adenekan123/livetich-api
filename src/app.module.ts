@@ -13,7 +13,9 @@ import { RoomGatewayModule } from './room-gateway/room-gateway.module';
 import { AuthModule } from './auth/auth.module';
 import { OrganizationsModule } from './organizations/organizations.module';
 import { CoursesModule } from './courses/courses.module';
+import { QuranModule } from './quran/quran.module';
 import { GroupsModule } from './groups/groups.module';
+import { HifzModule } from './hifz/hifz.module';
 import { PluginsModule } from './plugins/plugins.module';
 import { AssignmentsModule } from './assignments/assignments.module';
 import { AssessmentModule } from './assessment/assessment.module';
@@ -55,7 +57,9 @@ import { BoardModule } from './board/board.module';
     OrganizationsModule,
     PluginsModule,
     CoursesModule,
+    QuranModule,
     GroupsModule,
+    HifzModule,
     AssignmentsModule,
     AssessmentModule,
     SessionsModule,

@@ -43,6 +43,12 @@ enum RemediationStatus {
   DONE
 }
 
+/// A Hifz recitation is either freshly memorized material or revision (muraja'ah).
+enum HifzKind {
+  NEW_HIFZ
+  REVISION
+}
+
 /// A tenant: the teaching company. Owns its people, courses, and brand kit.
 model Organization {
   id           String   @id @default(cuid())
@@ -129,6 +135,10 @@ model User {
   groupMemberships   StudentGroupMember[]
   assessmentAttempts AssessmentAttempt[]
   remediations       AssignedRemediation[]
+  hifzTargets        HifzTarget[]   @relation("hifzTargetStudent")
+  hifzTargetsSet     HifzTarget[]   @relation("hifzTargetCreator")
+  hifzEntries        HifzEntry[]    @relation("hifzEntryStudent")
+  hifzEntriesRecorded HifzEntry[]   @relation("hifzEntryRecorder")
 
   @@index([organizationId])
 }
@@ -167,16 +177,19 @@ model Course {
   remediationTasks    RemediationTask[]
   assessments         Assessment[]
   documents           CourseDocument[]
+  hifzTargets         HifzTarget[]
+  hifzEntries         HifzEntry[]
 
   @@index([instructorId])
   @@index([organizationId])
 }
 
 model Section {
-  id       String @id @default(cuid())
-  courseId String
-  order    Int
-  title    String
+  id          String  @id @default(cuid())
+  courseId    String
+  order       Int
+  title       String
+  description String? @db.Text
 
   course      Course        @relation(fields: [courseId], references: [id])
   quizzes     Quiz[]
@@ -193,6 +206,8 @@ model Assignment {
   id           String    @id @default(cuid())
   courseId     String
   sectionId    String?
+  /// Optional live session this coursework is tied to (e.g. homework from a class).
+  sessionId    String?
   /// Target audience: null = whole class; set = only this group's members.
   groupId      String?
   title        String
@@ -204,6 +219,7 @@ model Assignment {
 
   course      Course        @relation(fields: [courseId], references: [id])
   section     Section?      @relation(fields: [sectionId], references: [id])
+  session     LiveSession?  @relation(fields: [sessionId], references: [id])
   group       StudentGroup? @relation(fields: [groupId], references: [id])
   createdBy   User          @relation("assignmentCreator", fields: [createdById], references: [id])
   submissions Submission[]
@@ -244,6 +260,8 @@ model Submission {
   studentId    String
   content      String?   @db.Text
   fileUrl      String?
+  /// MIME type of fileUrl when it is an uploaded blob (e.g. audio/webm).
+  fileMimeType String?
   submittedAt  DateTime  @default(now())
   grade        Int?
   feedback     String?   @db.Text
@@ -288,6 +306,8 @@ model LiveSession {
   quizzes     Quiz[]
   attendances Attendance[]
   assessment  Assessment?
+  assignments Assignment[]
+  hifzEntries HifzEntry[]
 
   @@index([courseId, status])
 }
@@ -525,4 +545,56 @@ model AssignedRemediation {
 
   @@unique([attemptId, taskId])
   @@index([studentId, status])
+}
+
+/// A memorization goal an instructor sets for one student: a surah/ayah range
+/// to have memorized by an optional due date. Progress is logged via HifzEntry.
+model HifzTarget {
+  id          String    @id @default(cuid())
+  courseId    String
+  studentId   String
+  surahNumber Int
+  ayahStart   Int
+  ayahEnd     Int
+  dueAt       DateTime?
+  note        String?   @db.Text
+  createdById String
+  createdAt   DateTime  @default(now())
+
+  course    Course @relation(fields: [courseId], references: [id])
+  student   User   @relation("hifzTargetStudent", fields: [studentId], references: [id])
+  createdBy User   @relation("hifzTargetCreator", fields: [createdById], references: [id])
+
+  @@index([courseId])
+  @@index([studentId])
+}
+
+/// One logged recitation: new memorization or revision (muraja'ah) of a
+/// surah/ayah range, with the instructor's rating and tajweed notes.
+model HifzEntry {
+  id           String   @id @default(cuid())
+  courseId     String
+  studentId    String
+  surahNumber  Int
+  ayahStart    Int
+  ayahEnd      Int
+  kind         HifzKind
+  /// Instructor's rating of the recitation, 1 (needs work) .. 5 (mastered).
+  rating       Int?
+  /// Free-text tajweed / correction notes for the student.
+  tajweed      String?  @db.Text
+  notes        String?  @db.Text
+  /// Live session this recitation was logged in (when logged from the class room).
+  sessionId    String?
+  recordedById String
+  recordedAt   DateTime @default(now())
+
+  course     Course       @relation(fields: [courseId], references: [id])
+  student    User         @relation("hifzEntryStudent", fields: [studentId], references: [id])
+  recordedBy User         @relation("hifzEntryRecorder", fields: [recordedById], references: [id])
+  session    LiveSession? @relation(fields: [sessionId], references: [id])
+
+  @@index([courseId, studentId])
+  @@index([studentId])
+  @@index([sessionId])
 }
