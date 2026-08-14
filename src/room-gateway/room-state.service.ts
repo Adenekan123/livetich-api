@@ -1,6 +1,11 @@
 import { Inject, Injectable } from '@nestjs/common';
 import Redis from 'ioredis';
-import type { BuzzerState, RoomUser, StageView } from '../shared';
+import type {
+  BuzzerState,
+  QuranPosition,
+  RoomUser,
+  StageView,
+} from '../shared';
 import { REDIS } from '../redis/redis.module';
 
 /**
@@ -58,7 +63,30 @@ export class RoomStateService {
 
   async getView(sessionId: string): Promise<StageView> {
     const v = await this.redis.get(this.k(sessionId, 'view'));
-    return v === 'board' ? 'board' : 'video';
+    return v === 'board' || v === 'quran' ? v : 'video';
+  }
+
+  // ---------- Shared mushaf position (instructor-driven) ----------
+
+  async setQuranPos(sessionId: string, pos: QuranPosition) {
+    await this.redis.set(
+      this.k(sessionId, 'quran'),
+      JSON.stringify(pos),
+      'EX',
+      RoomStateService.TTL,
+    );
+  }
+
+  /** Current mushaf position, defaulting to Al-Fatihah 1 for a fresh room. */
+  async getQuranPos(sessionId: string): Promise<QuranPosition> {
+    const raw = await this.redis.get(this.k(sessionId, 'quran'));
+    return raw ? (JSON.parse(raw) as QuranPosition) : { surah: 1, ayah: 1 };
+  }
+
+  /** True once the mushaf has a stored position — so we only seed a fresh room
+   *  from the last recitation once, and never stomp the instructor's live page. */
+  async hasQuranPos(sessionId: string): Promise<boolean> {
+    return (await this.redis.exists(this.k(sessionId, 'quran'))) === 1;
   }
 
   // ---------- Raised hands ----------

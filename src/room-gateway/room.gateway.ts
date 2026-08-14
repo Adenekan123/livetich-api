@@ -13,6 +13,7 @@ import { PointsReason, Prisma, Role, SessionStatus, UserStatus } from '@prisma/c
 import type { Server, Socket } from 'socket.io';
 import { AuthCacheService } from '../auth/auth-cache.service';
 import type { JwtPayload } from '../auth/jwt-payload';
+import { SkipThrottle } from '@nestjs/throttler';
 import { PointsService, POINTS_BUZZER_WIN } from '../points/points.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { LivekitService } from '../sessions/livekit.service';
@@ -28,6 +29,9 @@ import { RoomStateService } from './room-state.service';
 interface SocketData {
   user: JwtPayload;
   sessionIds: Set<string>;
+  /** Resolves once the account gate has run: true = permitted, false = rejected.
+   *  room:join awaits this so a message racing the async check can't slip past. */
+  authReady: Promise<boolean>;
 }
 
 type RoomServer = Server<
@@ -43,6 +47,10 @@ type RoomSocket = Socket<
   SocketData
 >;
 
+// The global HTTP ThrottlerGuard reads `req.ip` off an undefined request on a
+// socket message and would 500 it; sockets aren't rate-limited by the HTTP
+// throttler (the gateway does its own auth/validation).
+@SkipThrottle()
 @WebSocketGateway({ cors: { origin: true } })
 export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private readonly logger = new Logger(RoomGateway.name);
@@ -69,25 +77,48 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
   // ---------- Connection lifecycle ----------
 
   async handleConnection(client: RoomSocket) {
+    // Kick off auth and stash the promise so message handlers (which can arrive
+    // the instant the socket connects, before the async account check resolves)
+    // can await the outcome instead of racing it. The `.catch` keeps a transient
+    // failure from surfacing as an unhandled rejection and closes the socket.
+    client.data.authReady = this.authenticate(client).catch(() => {
+      client.disconnect(true);
+      return false;
+    });
+    await client.data.authReady;
+  }
+
+  /**
+   * Verify the socket's token and account state. The token is verified
+   * synchronously so `client.data.user` is attached before the first await —
+   * any handler then has an identity — while room:join additionally awaits
+   * `authReady` so it can't act before the account gate (disabled/unverified)
+   * has run. Emits an error and disconnects on failure.
+   */
+  private async authenticate(client: RoomSocket): Promise<boolean> {
     const token =
       (client.handshake.auth?.token as string | undefined) ??
       client.handshake.headers.authorization?.split(' ')[1];
     let user: JwtPayload;
     try {
-      user = await this.jwt.verifyAsync<JwtPayload>(token ?? '');
+      user = this.jwt.verify<JwtPayload>(token ?? '');
     } catch {
       client.emit('error', { code: 'UNAUTHORIZED', message: 'Invalid token' });
-      return client.disconnect(true);
+      client.disconnect(true);
+      return false;
     }
+    client.data.user = user;
+    client.data.sessionIds = new Set();
+
     // Same gate as the HTTP guard: disabled or unverified accounts can't hold a
     // live socket (the token is long-lived, so re-check against current state).
     const account = await this.authCache.getState(user.sub);
     if (!account || account.status === UserStatus.DISABLED || !account.emailVerified) {
       client.emit('error', { code: 'FORBIDDEN', message: 'Account not permitted' });
-      return client.disconnect(true);
+      client.disconnect(true);
+      return false;
     }
-    client.data.user = user;
-    client.data.sessionIds = new Set();
+    return true;
   }
 
   async handleDisconnect(client: RoomSocket) {
@@ -108,6 +139,10 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: RoomSocket,
     @MessageBody() p: { sessionId: string },
   ) {
+    // Wait out the account gate before doing anything — otherwise a rejected
+    // (disabled/unverified) socket could add presence in the brief window before
+    // it's disconnected.
+    if (!(await client.data.authReady)) return;
     const user = client.data.user;
     const session = await this.prisma.liveSession.findUnique({
       where: { id: p.sessionId },
@@ -122,9 +157,10 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
         return this.fail(client, 'FORBIDDEN', 'Not your session');
       }
     } else {
-      if (session.status !== SessionStatus.LIVE) {
-        return this.fail(client, 'NOT_LIVE', 'Session is not live yet');
-      }
+      // Enrolled students may enter a scheduled (not-yet-live) session and wait
+      // in the room — the client shows the "instructor will join soon" board,
+      // keyed off instructor presence. Rejecting them here left early joiners
+      // stuck: when the instructor later arrived, they were never re-admitted.
       const enrolled = await this.prisma.enrollment.findUnique({
         where: {
           courseId_studentId: {
@@ -150,8 +186,30 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
       sessionId: p.sessionId,
       view: await this.state.getView(p.sessionId),
     });
+    // Open the shared mushaf wherever the class last stopped reciting — seeded
+    // once for a fresh room (SETNX-style), so it never overrides the
+    // instructor's live page nor re-jumps on a reconnect.
+    if (!(await this.state.hasQuranPos(p.sessionId))) {
+      const anchor = await this.lastRecitationAnchor(session.course.id);
+      if (anchor) await this.state.setQuranPos(p.sessionId, anchor);
+    }
+    const pos = await this.state.getQuranPos(p.sessionId);
+    client.emit('quran:position', { sessionId: p.sessionId, ...pos });
     await this.broadcastHands(p.sessionId, client);
     await this.sendChatHistory(p.sessionId, client);
+  }
+
+  /** Where the course last stopped reciting — the end ayah of its most recent
+   *  Hifz entry — used to open a fresh session's mushaf at that spot. */
+  private async lastRecitationAnchor(
+    courseId: string,
+  ): Promise<{ surah: number; ayah: number } | null> {
+    const last = await this.prisma.hifzEntry.findFirst({
+      where: { courseId },
+      orderBy: { recordedAt: 'desc' },
+      select: { surahNumber: true, ayahEnd: true },
+    });
+    return last ? { surah: last.surahNumber, ayah: last.ayahEnd } : null;
   }
 
   /** Last 50 messages so late joiners aren't dropped into a blank chat. */
@@ -234,14 +292,32 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @SubscribeMessage('view:change')
   async onViewChange(
     @ConnectedSocket() client: RoomSocket,
-    @MessageBody() p: { sessionId: string; view: 'video' | 'board' },
+    @MessageBody() p: { sessionId: string; view: 'video' | 'board' | 'quran' },
   ) {
     if (!(await this.isOwner(client, p.sessionId))) return;
-    const view = p.view === 'board' ? 'board' : 'video';
+    const view =
+      p.view === 'board' || p.view === 'quran' ? p.view : 'video';
     await this.state.setView(p.sessionId, view);
     this.server
       .to(p.sessionId)
       .emit('view:changed', { sessionId: p.sessionId, view });
+  }
+
+  @SubscribeMessage('quran:navigate')
+  async onQuranNavigate(
+    @ConnectedSocket() client: RoomSocket,
+    @MessageBody() p: { sessionId: string; surah: number; ayah: number },
+  ) {
+    if (!(await this.isOwner(client, p.sessionId))) return;
+    // Clamp to the valid mushaf range; the client picks from the catalog, but
+    // never trust it — an out-of-range verse would blank every student's page.
+    const surah = Math.min(114, Math.max(1, Math.trunc(Number(p.surah) || 1)));
+    const ayah = Math.max(1, Math.trunc(Number(p.ayah) || 1));
+    const pos = { surah, ayah };
+    await this.state.setQuranPos(p.sessionId, pos);
+    this.server
+      .to(p.sessionId)
+      .emit('quran:position', { sessionId: p.sessionId, ...pos });
   }
 
   // ---------- Raised hands ----------

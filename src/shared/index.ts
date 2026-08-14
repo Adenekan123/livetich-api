@@ -8,7 +8,15 @@ export type Role = 'INSTRUCTOR' | 'STUDENT' | 'ORG_ADMIN';
 export type SessionStatus = 'SCHEDULED' | 'LIVE' | 'ENDED';
 
 /** Which surface the class is looking at. The instructor drives it for everyone. */
-export type StageView = 'video' | 'board';
+export type StageView = 'video' | 'board' | 'quran';
+
+/** The verse the shared mushaf is turned to (instructor-driven). */
+export interface QuranPosition {
+  /** 1-based surah number (1–114). */
+  surah: number;
+  /** 1-based ayah to anchor/highlight; the whole surah is shown around it. */
+  ayah: number;
+}
 
 export type PointsReason =
   | 'QUIZ_CORRECT'
@@ -87,8 +95,14 @@ export interface ClientToServerEvents {
   'student:pick-random': (p: { sessionId: string }) => void;
   'screen-share:grant': (p: { sessionId: string; userId: string }) => void;
   'screen-share:revoke': (p: { sessionId: string; userId: string }) => void;
-  /** Instructor switches the class between video and chalkboard for everyone. */
+  /** Instructor switches the class between video, chalkboard, and mushaf. */
   'view:change': (p: { sessionId: string; view: StageView }) => void;
+  /** Instructor turns the shared mushaf to a surah/ayah for everyone. */
+  'quran:navigate': (p: {
+    sessionId: string;
+    surah: number;
+    ayah: number;
+  }) => void;
 }
 
 export interface ServerToClientEvents {
@@ -103,6 +117,13 @@ export interface ServerToClientEvents {
 
   /** The active surface, driven by the instructor; students follow. */
   'view:changed': (p: { sessionId: string; view: StageView }) => void;
+
+  /** Where the shared mushaf is turned; students follow the instructor. */
+  'quran:position': (p: {
+    sessionId: string;
+    surah: number;
+    ayah: number;
+  }) => void;
 
   'leaderboard:update': (p: {
     sessionId: string;
