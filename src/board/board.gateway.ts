@@ -8,6 +8,7 @@ import {
   WebSocketGateway,
   WebSocketServer,
 } from '@nestjs/websockets';
+import { SkipThrottle } from '@nestjs/throttler';
 import { Role, SessionStatus, UserStatus } from '@prisma/client';
 import type { Server, Socket } from 'socket.io';
 import { AuthCacheService } from '../auth/auth-cache.service';
@@ -23,6 +24,9 @@ import { BoardDocService } from './board-doc.service';
 interface SocketData {
   user: JwtPayload;
   sessionIds: Set<string>;
+  /** Resolves once the account gate has run (see RoomGateway). board:join awaits
+   *  this so a message racing the async check can't slip past. */
+  authReady: Promise<boolean>;
 }
 
 type BoardServer = Server<
@@ -43,6 +47,8 @@ type BoardSocket = Socket<
  * the main room socket. The instructor is the only writer; students receive
  * the doc read-only (feature: chalkboard view).
  */
+// See RoomGateway: the HTTP ThrottlerGuard 500s on socket messages, so skip it.
+@SkipThrottle()
 @WebSocketGateway({ namespace: '/board', cors: { origin: true } })
 export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
@@ -56,23 +62,37 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ) {}
 
   async handleConnection(client: BoardSocket) {
+    // See RoomGateway: verify synchronously (identity ready before the first
+    // await) and stash the account-gate promise so board:join can await it.
+    client.data.authReady = this.authenticate(client).catch(() => {
+      client.disconnect(true);
+      return false;
+    });
+    await client.data.authReady;
+  }
+
+  private async authenticate(client: BoardSocket): Promise<boolean> {
     const token =
       (client.handshake.auth?.token as string | undefined) ??
       client.handshake.headers.authorization?.split(' ')[1];
     let user: JwtPayload;
     try {
-      user = await this.jwt.verifyAsync<JwtPayload>(token ?? '');
+      user = this.jwt.verify<JwtPayload>(token ?? '');
     } catch {
       client.emit('error', { code: 'UNAUTHORIZED', message: 'Invalid token' });
-      return client.disconnect(true);
-    }
-    const account = await this.authCache.getState(user.sub);
-    if (!account || account.status === UserStatus.DISABLED || !account.emailVerified) {
-      client.emit('error', { code: 'FORBIDDEN', message: 'Account not permitted' });
-      return client.disconnect(true);
+      client.disconnect(true);
+      return false;
     }
     client.data.user = user;
     client.data.sessionIds = new Set();
+
+    const account = await this.authCache.getState(user.sub);
+    if (!account || account.status === UserStatus.DISABLED || !account.emailVerified) {
+      client.emit('error', { code: 'FORBIDDEN', message: 'Account not permitted' });
+      client.disconnect(true);
+      return false;
+    }
+    return true;
   }
 
   async handleDisconnect(client: BoardSocket) {
@@ -86,6 +106,7 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: BoardSocket,
     @MessageBody() p: { sessionId: string },
   ) {
+    if (!(await client.data.authReady)) return;
     const user = client.data.user;
     if (client.data.sessionIds.has(p.sessionId)) return;
 
@@ -101,9 +122,8 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
         return this.fail(client, 'FORBIDDEN', 'Not your session');
       }
     } else {
-      if (session.status !== SessionStatus.LIVE) {
-        return this.fail(client, 'NOT_LIVE', 'Session is not live yet');
-      }
+      // Enrolled students may attach to a scheduled session's board (read-only)
+      // and stay synced when it goes live — see RoomGateway.onJoin.
       const enrolled = await this.prisma.enrollment.findUnique({
         where: {
           courseId_studentId: {

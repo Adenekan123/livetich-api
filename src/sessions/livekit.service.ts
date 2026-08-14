@@ -12,8 +12,9 @@ export class LivekitService {
   }
 
   /**
-   * Join token for a room. Students join subscribe-only; publish rights for
-   * screen share are granted later via participant-permission updates.
+   * Join token for a room. Everyone — instructor and students — may publish
+   * mic, camera and screen share (all start muted client-side; the classroom
+   * bar drives what's actually on air). Subscribe is always granted.
    */
   async mintJoinToken(opts: {
     room: string;
@@ -35,7 +36,7 @@ export class LivekitService {
     at.addGrant({
       roomJoin: true,
       room: opts.room,
-      canPublish: opts.role === Role.INSTRUCTOR,
+      canPublish: true,
       canSubscribe: true,
       canPublishData: true,
     });

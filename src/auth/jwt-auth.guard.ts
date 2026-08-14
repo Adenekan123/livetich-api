@@ -31,6 +31,13 @@ export class JwtAuthGuard implements CanActivate {
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
+    // Only HTTP requests carry a bearer header this guard can read. WebSocket
+    // gateways authenticate the socket in their own handleConnection lifecycle
+    // (the handshake token), so this global guard must not run on their message
+    // handlers — reading `req.headers` off a non-HTTP context throws and would
+    // 500 every socket message (room:join, chat, …).
+    if (context.getType() !== 'http') return true;
+
     const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
       context.getHandler(),
       context.getClass(),

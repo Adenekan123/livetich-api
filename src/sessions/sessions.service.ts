@@ -184,11 +184,21 @@ export class SessionsService {
       },
       update: {},
     });
-    if (session.status === SessionStatus.ENDED) {
-      throw new ConflictException('Session has ended');
+    // Ending class isn't terminal for the day: within today's join window (the
+    // guard above guarantees we're inside it) the room stays open, so an
+    // instructor who ended early — or students who drifted off — can re-enter.
+    // Reopen a previously-ended occurrence back to SCHEDULED; the instructor
+    // arriving then flips it LIVE via the branch below.
+    let status: SessionStatus = session.status;
+    if (status === SessionStatus.ENDED) {
+      await this.prisma.liveSession.update({
+        where: { id: session.id },
+        data: { status: SessionStatus.SCHEDULED, endedAt: null },
+      });
+      status = SessionStatus.SCHEDULED;
     }
     // The instructor arriving is what makes the room live.
-    if (isOwner && session.status === SessionStatus.SCHEDULED) {
+    if (isOwner && status === SessionStatus.SCHEDULED) {
       await this.prisma.liveSession.update({
         where: { id: session.id },
         data: { status: SessionStatus.LIVE, startedAt: new Date() },

@@ -19,6 +19,12 @@ export class RolesGuard implements CanActivate {
   constructor(private readonly reflector: Reflector) {}
 
   canActivate(context: ExecutionContext): boolean {
+    // Non-HTTP (WebSocket) handlers aren't role-gated here — the gateways do
+    // their own per-message role checks against the authenticated socket. This
+    // guard reads `req.user` off an HTTP request, which is undefined on a
+    // socket and would 500 the message.
+    if (context.getType() !== 'http') return true;
+
     const required = this.reflector.getAllAndOverride<Role[]>(ROLES_KEY, [
       context.getHandler(),
       context.getClass(),
