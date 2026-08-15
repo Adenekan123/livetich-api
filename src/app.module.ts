@@ -25,6 +25,7 @@ import { PointsModule } from './points/points.module';
 import { CertificatesModule } from './certificates/certificates.module';
 import { BoardModule } from './board/board.module';
 import { CodeModule } from './code/code.module';
+import { RealtimeModule } from './realtime/realtime.module';
 
 @Module({
   imports: [
@@ -69,6 +70,7 @@ import { CodeModule } from './code/code.module';
     CertificatesModule,
     BoardModule,
     CodeModule,
+    RealtimeModule,
   ],
   controllers: [AppController],
   providers: [AppService, { provide: APP_GUARD, useClass: ThrottlerGuard }],

@@ -130,6 +130,19 @@ export interface ServerToClientEvents {
     entries: LeaderboardEntry[];
   }) => void;
 
+  /** A student just submitted coursework tied to this session — pushed to the
+   *  instructor's staff room so the live grading panel updates in real time. */
+  'submission:new': (p: {
+    sessionId: string;
+    submissionId: string;
+    assignmentId: string;
+    assignmentTitle: string;
+    studentId: string;
+    studentName: string;
+    language: string | null;
+    submittedAt: string;
+  }) => void;
+
   'quiz:opened': (p: { sessionId: string; question: QuizQuestionPublic }) => void;
   'quiz:closed': (p: { sessionId: string; questionId: string }) => void;
 

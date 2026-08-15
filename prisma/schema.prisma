@@ -259,6 +259,9 @@ model Submission {
   assignmentId String
   studentId    String
   content      String?   @db.Text
+  /// For code submissions: the editor language id (e.g. "python"), so the
+  /// review UI can highlight it. Null for plain-text / file submissions.
+  language     String?
   fileUrl      String?
   /// MIME type of fileUrl when it is an uploaded blob (e.g. audio/webm).
   fileMimeType String?

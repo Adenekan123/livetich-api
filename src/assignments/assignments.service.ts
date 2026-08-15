@@ -14,6 +14,7 @@ import type { ObjectStorage } from '../storage/object-storage';
 import { CreateAssignmentDto } from './dto/create-assignment.dto';
 import { GradeSubmissionDto } from './dto/grade-submission.dto';
 import { SubmitAssignmentDto } from './dto/submit-assignment.dto';
+import { RoomBroadcaster } from '../realtime/room-broadcaster';
 
 /** What students may attach: recitation audio, plus images and PDFs. */
 const ALLOWED_UPLOAD_PREFIXES = ['audio/', 'image/'];
@@ -26,6 +27,7 @@ export class AssignmentsService {
     private readonly prisma: PrismaService,
     private readonly courses: CoursesService,
     @Inject(OBJECT_STORAGE) private readonly storage: ObjectStorage,
+    private readonly broadcaster: RoomBroadcaster,
   ) {}
 
   /** Instructor (assigned) or org admin creates coursework. */
@@ -167,6 +169,7 @@ export class AssignmentsService {
           submissionId: s.id,
           student: s.student,
           content: s.content,
+          language: s.language,
           fileUrl: s.fileUrl,
           fileMimeType: s.fileMimeType,
           submittedAt: s.submittedAt,
@@ -201,6 +204,7 @@ export class AssignmentsService {
 
     const data = {
       content: dto.content ?? null,
+      language: dto.language ?? null,
       fileUrl: dto.fileUrl ?? null,
       fileMimeType: null,
       submittedAt: new Date(),
@@ -209,13 +213,33 @@ export class AssignmentsService {
       gradedById: null,
       gradedAt: null,
     };
-    return this.prisma.submission.upsert({
+    const submission = await this.prisma.submission.upsert({
       where: {
         assignmentId_studentId: { assignmentId, studentId: user.sub },
       },
       create: { assignmentId, studentId: user.sub, ...data },
       update: data,
     });
+
+    // Real-time: if this coursework is tied to a live session, push the new
+    // submission to that session's instructor panel (staff-only room).
+    const assignment = await this.prisma.assignment.findUnique({
+      where: { id: assignmentId },
+      select: { sessionId: true, title: true },
+    });
+    if (assignment?.sessionId) {
+      this.broadcaster.emitToSessionStaff(assignment.sessionId, 'submission:new', {
+        sessionId: assignment.sessionId,
+        submissionId: submission.id,
+        assignmentId,
+        assignmentTitle: assignment.title,
+        studentId: user.sub,
+        studentName: user.name,
+        language: submission.language ?? null,
+        submittedAt: submission.submittedAt.toISOString(),
+      });
+    }
+    return submission;
   }
 
   /**

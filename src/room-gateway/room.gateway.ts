@@ -5,6 +5,7 @@ import {
   MessageBody,
   OnGatewayConnection,
   OnGatewayDisconnect,
+  OnGatewayInit,
   SubscribeMessage,
   WebSocketGateway,
   WebSocketServer,
@@ -25,6 +26,7 @@ import type {
   ServerToClientEvents,
 } from '../shared';
 import { RoomStateService } from './room-state.service';
+import { RoomBroadcaster, staffRoom } from '../realtime/room-broadcaster';
 
 interface SocketData {
   user: JwtPayload;
@@ -52,7 +54,9 @@ type RoomSocket = Socket<
 // throttler (the gateway does its own auth/validation).
 @SkipThrottle()
 @WebSocketGateway({ cors: { origin: true } })
-export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class RoomGateway
+  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
+{
   private readonly logger = new Logger(RoomGateway.name);
 
   /**
@@ -72,7 +76,13 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly points: PointsService,
     private readonly livekit: LivekitService,
     private readonly authCache: AuthCacheService,
+    private readonly broadcaster: RoomBroadcaster,
   ) {}
+
+  // Hand the socket server to the broadcaster so HTTP code can push into rooms.
+  afterInit(server: RoomServer) {
+    this.broadcaster.bind(server);
+  }
 
   // ---------- Connection lifecycle ----------
 
@@ -174,6 +184,9 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
 
     await client.join(p.sessionId);
+    // Staff join a private sub-room for instructor-only pushes (e.g. incoming
+    // submissions), so student PII never fans out to peer students.
+    if (user.role !== Role.STUDENT) await client.join(staffRoom(p.sessionId));
     client.data.sessionIds.add(p.sessionId);
     await this.state.addPresence(p.sessionId, this.roomUser(user));
     await this.broadcastPresence(p.sessionId);
