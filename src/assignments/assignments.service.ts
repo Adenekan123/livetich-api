@@ -191,6 +191,46 @@ export class AssignmentsService {
     });
   }
 
+  /**
+   * The signed-in student's assignments across their enrolled courses —
+   * whole-class ones plus any targeting a group they belong to — with a flag
+   * for whether they've already submitted. Powers the VSCode extension picker.
+   */
+  async mine(user: JwtPayload) {
+    const enrollments = await this.prisma.enrollment.findMany({
+      where: { studentId: user.sub },
+      select: { courseId: true },
+    });
+    const courseIds = enrollments.map((e) => e.courseId);
+    if (courseIds.length === 0) return [];
+
+    const assignments = await this.prisma.assignment.findMany({
+      where: {
+        courseId: { in: courseIds },
+        OR: [
+          { groupId: null },
+          { group: { members: { some: { studentId: user.sub } } } },
+        ],
+      },
+      orderBy: [{ createdAt: 'desc' }],
+      include: {
+        course: { select: { title: true } },
+        session: { select: { id: true, status: true } },
+        submissions: { where: { studentId: user.sub }, select: { id: true } },
+      },
+    });
+
+    return assignments.map((a) => ({
+      id: a.id,
+      title: a.title,
+      courseTitle: a.course.title,
+      sessionId: a.sessionId,
+      sessionLive: a.session?.status === 'LIVE',
+      dueAt: a.dueAt,
+      submitted: a.submissions.length > 0,
+    }));
+  }
+
   /** Student submits (or resubmits) — resubmission clears any prior grade. */
   async submit(
     user: JwtPayload,

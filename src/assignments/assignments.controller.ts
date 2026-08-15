@@ -62,6 +62,14 @@ export class AssignmentsController {
 
   // ---- Student submission ----
 
+  /** The signed-in student's assignments across enrolled courses — powers the
+   *  VSCode extension's submit picker (and a future web "my work" view). */
+  @Get('assignments/mine')
+  @Roles(Role.STUDENT)
+  mine(@CurrentUser() user: JwtPayload) {
+    return this.assignments.mine(user);
+  }
+
   @Post('assignments/:id/submissions')
   @Roles(Role.STUDENT)
   submit(
