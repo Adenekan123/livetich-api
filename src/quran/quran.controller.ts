@@ -5,7 +5,10 @@ import {
   NotFoundException,
   Param,
   ParseIntPipe,
+  UseGuards,
 } from '@nestjs/common';
+import { PLUGIN_ISLAMIC_EDUCATION } from '../plugins/catalog';
+import { RequirePlugin, RequirePluginGuard } from '../plugins/require-plugin.guard';
 import { getSurahAyahs } from './quran-text';
 import { SURAHS, TOTAL_AYAHS } from './surahs';
 
@@ -13,9 +16,12 @@ import { SURAHS, TOTAL_AYAHS } from './surahs';
  * Serves the static surah catalog so the web app can render memorization
  * pickers without shipping the 114-entry table itself, plus the full verse
  * text of a single surah for the live mushaf reader. Authed (global guard)
- * but not course-scoped — it's the same reference data for everyone.
+ * and gated on the Islamic Education pack — the same reference data for every
+ * org that has the pack on, but not course-scoped.
  */
 @Controller('quran')
+@UseGuards(RequirePluginGuard)
+@RequirePlugin(PLUGIN_ISLAMIC_EDUCATION)
 export class QuranController {
   @Get('surahs')
   surahs() {

@@ -63,7 +63,7 @@ export class RoomStateService {
 
   async getView(sessionId: string): Promise<StageView> {
     const v = await this.redis.get(this.k(sessionId, 'view'));
-    return v === 'board' || v === 'quran' ? v : 'video';
+    return v === 'board' || v === 'quran' || v === 'code' ? v : 'video';
   }
 
   // ---------- Shared mushaf position (instructor-driven) ----------

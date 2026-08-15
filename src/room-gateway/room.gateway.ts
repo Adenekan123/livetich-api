@@ -292,11 +292,14 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @SubscribeMessage('view:change')
   async onViewChange(
     @ConnectedSocket() client: RoomSocket,
-    @MessageBody() p: { sessionId: string; view: 'video' | 'board' | 'quran' },
+    @MessageBody()
+    p: { sessionId: string; view: 'video' | 'board' | 'quran' | 'code' },
   ) {
     if (!(await this.isOwner(client, p.sessionId))) return;
     const view =
-      p.view === 'board' || p.view === 'quran' ? p.view : 'video';
+      p.view === 'board' || p.view === 'quran' || p.view === 'code'
+        ? p.view
+        : 'video';
     await this.state.setView(p.sessionId, view);
     this.server
       .to(p.sessionId)

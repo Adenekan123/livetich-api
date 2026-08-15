@@ -17,6 +17,11 @@ export interface PluginDef {
   priceMonthly: number | null;
 }
 
+/** Pack keys, referenced by feature code that gates on an entitlement. Keep in
+ *  sync with the catalog entries below. */
+export const PLUGIN_ISLAMIC_EDUCATION = 'islamic-education';
+export const PLUGIN_CODE_INSTRUCTION = 'code-instruction';
+
 export const PLUGIN_CATALOG: readonly PluginDef[] = [
   {
     key: 'islamic-education',
@@ -36,11 +41,12 @@ export const PLUGIN_CATALOG: readonly PluginDef[] = [
     key: 'code-instruction',
     name: 'Code Instruction',
     summary:
-      'Tools for programming instructors — syntax-highlighted board and chat, ' +
-      'and code assignments graded through the assessment engine.',
+      'Tools for programming instructors — a live, syntax-highlighted code ' +
+      'board the class follows in real time, with per-language editing.',
     features: [
-      'Syntax-highlighted code board & chat',
-      'Code assignment type with deterministic grading',
+      'Live shared code editor as a classroom surface',
+      'Syntax highlighting across common languages',
+      'Instructor drives; students follow read-only',
     ],
     priceMonthly: null,
   },

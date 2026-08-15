@@ -8,7 +8,7 @@ export type Role = 'INSTRUCTOR' | 'STUDENT' | 'ORG_ADMIN';
 export type SessionStatus = 'SCHEDULED' | 'LIVE' | 'ENDED';
 
 /** Which surface the class is looking at. The instructor drives it for everyone. */
-export type StageView = 'video' | 'board' | 'quran';
+export type StageView = 'video' | 'board' | 'quran' | 'code';
 
 /** The verse the shared mushaf is turned to (instructor-driven). */
 export interface QuranPosition {
@@ -168,6 +168,30 @@ export interface BoardServerToClientEvents {
   'board:state': (p: { sessionId: string; update: BoardBinary }) => void;
   'board:update': (p: { sessionId: string; update: BoardBinary }) => void;
   'board:awareness': (p: { sessionId: string; update: BoardBinary }) => void;
+
+  error: (p: { code: string; message: string }) => void;
+}
+
+/**
+ * Shared code editor (Code Instruction pack) — its own `/code` namespace, same
+ * Yjs-over-socket shape as the chalkboard: a Y.Text (the buffer) plus a Y.Map
+ * holding the language, so both persist and replay in one doc. Instructor
+ * writes; students follow read-only.
+ */
+export interface CodeClientToServerEvents {
+  'code:join': (p: { sessionId: string }) => void;
+  'code:leave': (p: { sessionId: string }) => void;
+  /** Instructor-only: incremental Yjs document update. */
+  'code:update': (p: { sessionId: string; update: BoardBinary }) => void;
+  /** Cursor/selection presence — relayed to the room, never persisted. */
+  'code:awareness': (p: { sessionId: string; update: BoardBinary }) => void;
+}
+
+export interface CodeServerToClientEvents {
+  /** Full document state, sent to the joining client after code:join. */
+  'code:state': (p: { sessionId: string; update: BoardBinary }) => void;
+  'code:update': (p: { sessionId: string; update: BoardBinary }) => void;
+  'code:awareness': (p: { sessionId: string; update: BoardBinary }) => void;
 
   error: (p: { code: string; message: string }) => void;
 }

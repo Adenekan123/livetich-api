@@ -5,16 +5,21 @@ import {
   Get,
   Param,
   Post,
+  UseGuards,
 } from '@nestjs/common';
 import { CurrentUser } from '../auth/current-user.decorator';
 import type { JwtPayload } from '../auth/jwt-payload';
+import { PLUGIN_ISLAMIC_EDUCATION } from '../plugins/catalog';
+import { RequirePlugin, RequirePluginGuard } from '../plugins/require-plugin.guard';
 import { CreateHifzTargetDto } from './dto/create-target.dto';
 import { HifzService } from './hifz.service';
 import { LogHifzEntryDto } from './dto/log-entry.dto';
 
 /** Hifz tracking lives under a course. Instructor/admin manage; students read
- *  their own via /mine. */
+ *  their own via /mine. Gated on the Islamic Education pack. */
 @Controller('courses/:courseId/hifz')
+@UseGuards(RequirePluginGuard)
+@RequirePlugin(PLUGIN_ISLAMIC_EDUCATION)
 export class HifzController {
   constructor(private readonly hifz: HifzService) {}
 
