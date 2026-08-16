@@ -4,12 +4,13 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Role } from '@prisma/client';
+import { Prisma, Role } from '@prisma/client';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { CoursesService } from '../courses/courses.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateExamDto } from './dto/create-exam.dto';
 import { SubmitExamDto } from './dto/submit-exam.dto';
+import { UpdateExamDto } from './dto/update-exam.dto';
 
 @Injectable()
 export class ExamsService {
@@ -128,6 +129,89 @@ export class ExamsService {
         answered: b.total,
       })),
     };
+  }
+
+  /** Full exam (with questions) for the edit form. */
+  async getExam(user: JwtPayload, courseId: string, examId: string) {
+    await this.courses.assertCanManageCourse(user, courseId);
+    const exam = await this.prisma.exam.findFirst({
+      where: { id: examId, courseId, active: true },
+      include: {
+        questions: { orderBy: { order: 'asc' } },
+        _count: { select: { attempts: true } },
+      },
+    });
+    if (!exam) throw new NotFoundException('Exam not found');
+    return {
+      id: exam.id,
+      title: exam.title,
+      durationMinutes: exam.durationMinutes,
+      // Questions are frozen once anyone has attempted, to keep past scores valid.
+      hasAttempts: exam._count.attempts > 0,
+      questions: exam.questions.map((q) => ({
+        body: q.body,
+        options: q.options as string[],
+        correctIndex: q.correctIndex,
+        topic: q.topic ?? undefined,
+      })),
+    };
+  }
+
+  async updateExam(
+    user: JwtPayload,
+    courseId: string,
+    examId: string,
+    dto: UpdateExamDto,
+  ) {
+    await this.courses.assertCanManageCourse(user, courseId);
+    const exam = await this.prisma.exam.findFirst({
+      where: { id: examId, courseId, active: true },
+      include: { _count: { select: { attempts: true } } },
+    });
+    if (!exam) throw new NotFoundException('Exam not found');
+
+    const data: Prisma.ExamUpdateInput = {};
+    if (dto.title !== undefined) data.title = dto.title;
+    if (dto.durationMinutes !== undefined) data.durationMinutes = dto.durationMinutes;
+
+    if (dto.questions) {
+      if (exam._count.attempts > 0) {
+        throw new BadRequestException(
+          'Questions cannot change after students have attempted this exam',
+        );
+      }
+      dto.questions.forEach((q, i) => {
+        if (q.correctIndex >= q.options.length) {
+          throw new BadRequestException(`Question ${i + 1}: correctIndex is out of range`);
+        }
+      });
+      await this.prisma.examQuestion.deleteMany({ where: { examId } });
+      data.questions = {
+        create: dto.questions.map((q, i) => ({
+          body: q.body,
+          options: q.options,
+          correctIndex: q.correctIndex,
+          topic: q.topic ?? null,
+          order: i,
+        })),
+      };
+    }
+
+    await this.prisma.exam.update({ where: { id: examId }, data });
+    return { id: examId };
+  }
+
+  /** Soft-delete — attempts + past scores are kept, the exam just disappears
+   *  from both the manager and student lists. */
+  async deleteExam(user: JwtPayload, courseId: string, examId: string) {
+    await this.courses.assertCanManageCourse(user, courseId);
+    const exam = await this.prisma.exam.findFirst({
+      where: { id: examId, courseId },
+      select: { id: true },
+    });
+    if (!exam) throw new NotFoundException('Exam not found');
+    await this.prisma.exam.update({ where: { id: examId }, data: { active: false } });
+    return { ok: true };
   }
 
   // --------------------------- Student-facing ---------------------------
@@ -267,21 +351,32 @@ export class ExamsService {
       if (correctById.has(a.questionId)) chosen.set(a.questionId, a.chosenIndex);
     }
 
+    // Server-side time limit: the client auto-submits at the deadline, but a
+    // late submit (clock skew / closed tab) is enforced here too. A 60s grace
+    // absorbs the auto-submit round-trip; beyond that the attempt is expired
+    // and scores 0 so extra time can't be gamed.
+    const GRACE_MS = 60_000;
+    const deadline =
+      attempt.startedAt.getTime() + attempt.exam.durationMinutes * 60_000;
+    const expired = Date.now() > deadline + GRACE_MS;
+
     const total = attempt.exam.questions.length;
     let correct = 0;
     for (const [qid, idx] of chosen) {
       if (correctById.get(qid) === idx) correct += 1;
     }
-    const score = total ? Math.round((correct / total) * 100) : 0;
+    const score = expired ? 0 : total ? Math.round((correct / total) * 100) : 0;
 
     await this.prisma.$transaction([
       this.prisma.examAnswer.deleteMany({ where: { attemptId } }),
       this.prisma.examAnswer.createMany({
-        data: [...chosen].map(([questionId, chosenIndex]) => ({
-          attemptId,
-          questionId,
-          chosenIndex,
-        })),
+        data: expired
+          ? []
+          : [...chosen].map(([questionId, chosenIndex]) => ({
+              attemptId,
+              questionId,
+              chosenIndex,
+            })),
       }),
       this.prisma.examAttempt.update({
         where: { id: attemptId },
@@ -289,7 +384,13 @@ export class ExamsService {
       }),
     ]);
 
-    return { score, correct, total, answered: chosen.size };
+    return {
+      score,
+      correct: expired ? 0 : correct,
+      total,
+      answered: expired ? 0 : chosen.size,
+      expired,
+    };
   }
 
   // ------------------------------ helpers ------------------------------

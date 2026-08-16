@@ -1,9 +1,11 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   Param,
+  Patch,
   Post,
   Query,
   UseGuards,
@@ -18,6 +20,7 @@ import { AlocService } from './aloc.service';
 import { CreateExamDto } from './dto/create-exam.dto';
 import { ImportQuestionsDto } from './dto/import-questions.dto';
 import { SubmitExamDto } from './dto/submit-exam.dto';
+import { UpdateExamDto } from './dto/update-exam.dto';
 import { ExamsService } from './exams.service';
 
 /** Test Prep add-on: timed mock exams. Every route is gated on the pack, so an
@@ -94,5 +97,36 @@ export class ExamsController {
     @Body() dto: SubmitExamDto,
   ) {
     return this.exams.submit(user, attemptId, dto);
+  }
+
+  // ---------- Manager: edit + delete ----------
+  // Declared after the literal `.../exams/available` route so it wins the match.
+
+  @Get('courses/:courseId/exams/:examId')
+  getExam(
+    @CurrentUser() user: JwtPayload,
+    @Param('courseId') courseId: string,
+    @Param('examId') examId: string,
+  ) {
+    return this.exams.getExam(user, courseId, examId);
+  }
+
+  @Patch('courses/:courseId/exams/:examId')
+  update(
+    @CurrentUser() user: JwtPayload,
+    @Param('courseId') courseId: string,
+    @Param('examId') examId: string,
+    @Body() dto: UpdateExamDto,
+  ) {
+    return this.exams.updateExam(user, courseId, examId, dto);
+  }
+
+  @Delete('courses/:courseId/exams/:examId')
+  remove(
+    @CurrentUser() user: JwtPayload,
+    @Param('courseId') courseId: string,
+    @Param('examId') examId: string,
+  ) {
+    return this.exams.deleteExam(user, courseId, examId);
   }
 }
