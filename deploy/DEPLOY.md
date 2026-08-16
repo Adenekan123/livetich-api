@@ -19,6 +19,61 @@ instance later needs a Redis-backed throttle store and `y-redis` for the board
 
 ---
 
+## 0. Quickstart — Hetzner + LiveKit Cloud + Cloudflare (chosen setup)
+
+The pilot target: a Hetzner box for the app, **LiveKit Cloud** for video (so
+Hetzner's EU location doesn't affect call quality), **Cloudflare** for DNS.
+Total ≈ **€5/mo** + LiveKit Cloud free tier. If Hetzner's signup rejects your
+card/ID (it can be strict from some regions), fall back to **Vultr Johannesburg**
+— every step below is identical bar the provider console.
+
+**a. Server.** Hetzner Cloud → new project → **CX22** (2 vCPU / 4 GB), image
+**Ubuntu 24.04**, location **Nuremberg/Falkenstein**, add your SSH key. Then in
+Hetzner **Cloud Firewall** allow inbound **22** (ideally only your IP), **80**,
+**443** — nothing else (video is on LiveKit Cloud, so no UDP ports needed).
+
+**b. LiveKit Cloud.** Create a project at cloud.livekit.io → copy the **URL**
+(`wss://<you>.livekit.cloud`), **API key**, **API secret** → these become
+`LIVEKIT_URL/KEY/SECRET` in step (e). Leave the compose `livekit` profile OFF.
+
+**c. DNS (Cloudflare).** Add A records `app` and `api` → the server IP. Set both
+to **DNS-only (grey cloud)** for now so Caddy can get Let's Encrypt certs via the
+HTTP challenge. (You can switch to proxied/orange later with SSL mode
+*Full (strict)*.)
+
+**d. Install Docker + clone.**
+```bash
+ssh root@<server-ip>
+curl -fsSL https://get.docker.com | sh
+# 4 GB is enough, but add 2 GB swap so the web build can't OOM:
+fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+echo '/swapfile none swap sw 0 0' >> /etc/fstab
+git clone <livetich-api-url> && git clone <livetich-web-url>   # side by side
+cd livetich-api
+```
+
+**e. Configure.**
+```bash
+cp deploy/.env.prod.example deploy/.env.prod
+nano deploy/.env.prod
+```
+Set: `APP_DOMAIN=app.yourdomain`, `API_DOMAIN=api.yourdomain`, `ACME_EMAIL`,
+`NEXT_PUBLIC_API_URL=https://api.yourdomain`, `WEB_ORIGIN=https://app.yourdomain`,
+`WEB_URL=https://app.yourdomain`, `CERT_VERIFY_BASE=https://api.yourdomain/certificates/verify`,
+the three `LIVEKIT_*` from step (b), and generate the secrets:
+`openssl rand -base64 48` → `JWT_SECRET`; `openssl rand -base64 24` →
+`MYSQL_PASSWORD`/`MYSQL_ROOT_PASSWORD` (then make `DATABASE_URL` match).
+
+**f. Launch.**
+```bash
+docker compose --env-file deploy/.env.prod -f docker-compose.prod.yml up -d --build
+curl -fsS https://api.yourdomain/health        # → {"status":"ok","db":true,...}
+```
+Then create the first org (step §4 below), seed the plugin catalog, and set up
+the nightly backup cron (§8). Done — see the sections below for detail on each.
+
+---
+
 ## 1. Prerequisites
 
 - A VPS: **2 vCPU / 4 GB RAM** is comfortable for the pilot (1 GB min; the web
