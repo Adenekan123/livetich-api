@@ -55,13 +55,15 @@ const connect = (token) =>
 
 // ---------- Setup via REST ----------
 
+// Driven by scripts/code-test-setup.cjs output (pass its JSON as argv[2]) so we
+// use an instructor-owned course with enrolled students, not brittle seed guesses.
+const setup = JSON.parse(process.argv[2] ?? process.env.SETUP ?? '{}');
 const [it, st, s2] = await Promise.all([
-  login('instructor@livetich.dev'),
-  login('student@livetich.dev'),
-  login('student2@livetich.dev'),
+  login(setup.instructor ?? 'instructor@livetich.dev'),
+  login(setup.student ?? 'seedstudent1@livetich.dev'),
+  login('seedstudent2@livetich.dev'),
 ]);
-const courses = await req('GET', '/courses', it);
-const courseId = courses[0].id;
+const courseId = setup.codeCourseId ?? (await req('GET', '/courses', it))[0].id;
 
 // Fresh session for a clean room
 const session = await req('POST', '/sessions', it, {
@@ -159,15 +161,15 @@ check('second attempt rejected', true);
 // student2 answers correct -> winner + points + leaderboard.
 // The ledger accumulates across runs, so assert the delta rather than a total.
 const lbBefore = await req('GET', `/points/leaderboard?courseId=${courseId}`, it);
-const s2Before = lbBefore.find((e) => e.name === 'Second Student')?.points ?? 0;
+const s2Before = lbBefore.find((e) => e.name === 'Student 2')?.points ?? 0;
 const winnerSeen = waitFor(iSock, 'buzzer:state', (p) => p.state.phase === 'WINNER');
 const lbSeen = waitFor(iSock, 'leaderboard:update');
 s2Sock.emit('quiz:answer', { sessionId: sid, questionId: q1, answerIndex: 1 });
 const winner = await winnerSeen;
-check('correct answer wins buzzer', winner.state.winner.name === 'Second Student',
+check('correct answer wins buzzer', winner.state.winner.name === 'Student 2',
   winner.state.winner.name);
 const lb = await lbSeen;
-const s2Row = lb.entries.find((e) => e.name === 'Second Student');
+const s2Row = lb.entries.find((e) => e.name === 'Student 2');
 check('buzzer win awards +25 on leaderboard', s2Row.points === s2Before + 25,
   `points=${s2Row.points} (was ${s2Before})`);
 

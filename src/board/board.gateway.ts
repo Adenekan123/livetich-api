@@ -100,7 +100,9 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   async handleDisconnect(client: BoardSocket) {
     for (const sessionId of client.data.sessionIds ?? []) {
-      await this.docs.release(sessionId);
+      // When the last client leaves, drop the "students may draw" flag too, so
+      // it can't leak into a later class on the same session (or grow forever).
+      if (await this.docs.release(sessionId)) this.writable.delete(sessionId);
     }
   }
 
@@ -180,7 +182,7 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ) {
     if (!client.data.sessionIds.delete(p.sessionId)) return;
     await client.leave(p.sessionId);
-    await this.docs.release(p.sessionId);
+    if (await this.docs.release(p.sessionId)) this.writable.delete(p.sessionId);
   }
 
   @SubscribeMessage('board:update')

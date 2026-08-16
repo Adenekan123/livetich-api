@@ -59,13 +59,16 @@ const bytes = (data) => new Uint8Array(data);
 
 // ---------- Setup via REST ----------
 
+// Driven by scripts/code-test-setup.cjs output (pass its JSON as argv[2]): an
+// instructor-owned course, an enrolled student, and a second instructor who is
+// NOT the owner (grace) for the forbidden-join check.
+const setup = JSON.parse(process.argv[2] ?? process.env.SETUP ?? '{}');
 const [it, st, ot] = await Promise.all([
-  login('instructor@livetich.dev'),
-  login('student@livetich.dev'),
-  login('other@livetich.dev'),
+  login(setup.instructor ?? 'instructor@livetich.dev'),
+  login(setup.student ?? 'seedstudent1@livetich.dev'),
+  login(setup.plainInstructor ?? 'grace@livetich.dev'),
 ]);
-const courses = await req('GET', '/courses', it);
-const courseId = courses[0].id;
+const courseId = setup.codeCourseId ?? (await req('GET', '/courses', it))[0].id;
 const session = await req('POST', '/sessions', it, {
   courseId,
   scheduledAt: new Date().toISOString(),

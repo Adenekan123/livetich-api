@@ -47,15 +47,18 @@ export class BoardDocService implements OnModuleDestroy {
     return entry.doc;
   }
 
-  /** Count a client out; the last one flushes and evicts the doc. */
-  async release(sessionId: string): Promise<void> {
+  /** Count a client out; the last one flushes and evicts the doc. Returns
+   *  true when this was the last client (the room is now empty), so callers
+   *  can drop any per-session state they keep alongside the doc. */
+  async release(sessionId: string): Promise<boolean> {
     const entry = this.boards.get(sessionId);
-    if (!entry) return;
+    if (!entry) return false;
     entry.clients -= 1;
-    if (entry.clients > 0) return;
+    if (entry.clients > 0) return false;
     await this.flush(sessionId, entry);
     entry.doc.destroy();
     this.boards.delete(sessionId);
+    return true;
   }
 
   applyUpdate(sessionId: string, update: Uint8Array): boolean {
