@@ -19,6 +19,7 @@ import { HifzModule } from './hifz/hifz.module';
 import { PluginsModule } from './plugins/plugins.module';
 import { AssignmentsModule } from './assignments/assignments.module';
 import { AssessmentModule } from './assessment/assessment.module';
+import { ExamsModule } from './exams/exams.module';
 import { SessionsModule } from './sessions/sessions.module';
 import { QuizModule } from './quiz/quiz.module';
 import { PointsModule } from './points/points.module';
@@ -64,6 +65,7 @@ import { RealtimeModule } from './realtime/realtime.module';
     HifzModule,
     AssignmentsModule,
     AssessmentModule,
+    ExamsModule,
     SessionsModule,
     QuizModule,
     PointsModule,

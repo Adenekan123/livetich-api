@@ -21,6 +21,7 @@ export interface PluginDef {
  *  sync with the catalog entries below. */
 export const PLUGIN_ISLAMIC_EDUCATION = 'islamic-education';
 export const PLUGIN_CODE_INSTRUCTION = 'code-instruction';
+export const PLUGIN_TEST_PREP = 'test-prep';
 
 export const PLUGIN_CATALOG: readonly PluginDef[] = [
   {
@@ -47,6 +48,20 @@ export const PLUGIN_CATALOG: readonly PluginDef[] = [
       'Live shared code editor as a classroom surface',
       'Syntax highlighting across common languages',
       'Instructor drives; students follow read-only',
+    ],
+    priceMonthly: null,
+  },
+  {
+    key: 'test-prep',
+    name: 'Test Prep',
+    summary:
+      'Tools for exam-coaching instructors (JAMB, WAEC, NECO, Post-UTME) — ' +
+      'a question bank, timed mock exams that auto-score, and per-topic ' +
+      'performance analytics.',
+    features: [
+      'Author timed mock exams from a question bank',
+      'Students sit exams against the clock; auto-scored on submit',
+      'Per-topic breakdown to spot weak areas',
     ],
     priceMonthly: null,
   },

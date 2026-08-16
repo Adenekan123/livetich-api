@@ -139,6 +139,8 @@ model User {
   hifzTargetsSet     HifzTarget[]   @relation("hifzTargetCreator")
   hifzEntries        HifzEntry[]    @relation("hifzEntryStudent")
   hifzEntriesRecorded HifzEntry[]   @relation("hifzEntryRecorder")
+  examsCreated       Exam[]         @relation("examCreator")
+  examAttempts       ExamAttempt[]  @relation("examAttemptStudent")
 
   @@index([organizationId])
 }
@@ -179,6 +181,7 @@ model Course {
   documents           CourseDocument[]
   hifzTargets         HifzTarget[]
   hifzEntries         HifzEntry[]
+  exams               Exam[]
 
   @@index([instructorId])
   @@index([organizationId])
@@ -600,4 +603,88 @@ model HifzEntry {
   @@index([courseId, studentId])
   @@index([studentId])
   @@index([sessionId])
+}
+
+// ===================== Test Prep (add-on pack: test-prep) =====================
+// Standalone, instructor-authored timed mock exams — distinct from the
+// session-scoped Assessment flow above. Gated on the `test-prep` plugin.
+
+model Exam {
+  id              String   @id @default(cuid())
+  courseId        String
+  title           String
+  /// Time limit in minutes; an attempt auto-scores whatever's answered at the deadline.
+  durationMinutes Int
+  active          Boolean  @default(true)
+  createdById     String
+  createdAt       DateTime @default(now())
+
+  course    Course         @relation(fields: [courseId], references: [id])
+  createdBy User           @relation("examCreator", fields: [createdById], references: [id])
+  questions ExamQuestion[]
+  attempts  ExamAttempt[]
+
+  @@index([courseId])
+}
+
+model ExamQuestion {
+  id           String   @id @default(cuid())
+  examId       String
+  body         String   @db.Text
+  /// string[] — MySQL has no native array type
+  options      Json
+  correctIndex Int
+  /// Optional topic label, drives per-topic analytics (e.g. "Algebra").
+  topic        String?
+  order        Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  exam    Exam         @relation(fields: [examId], references: [id])
+  answers ExamAnswer[]
+
+  @@index([examId])
+}
+
+model ExamAttempt {
+  id          String    @id @default(cuid())
+  examId      String
+  studentId   String
+  startedAt   DateTime  @default(now())
+  submittedAt DateTime?
+  /// Percent correct (0–100), set on submit.
+  score       Int?
+
+  exam    Exam         @relation(fields: [examId], references: [id])
+  student User         @relation("examAttemptStudent", fields: [studentId], references: [id])
+  answers ExamAnswer[]
+
+  @@index([examId, studentId])
+}
+
+model ExamAnswer {
+  attemptId   String
+  questionId  String
+  chosenIndex Int
+
+  attempt  ExamAttempt  @relation(fields: [attemptId], references: [id])
+  question ExamQuestion @relation(fields: [questionId], references: [id])
+
+  @@id([attemptId, questionId])
+}
+
+/// Org-agnostic pool of questions already pulled from ALOC, keyed by ALOC's own
+/// question id. Import checks here first so repeat pulls cost no credits. Past
+/// questions are the same for every tenant, so the pool is shared globally.
+model AlocQuestionCache {
+  id           String   @id // ALOC's question id
+  subject      String
+  examType     String
+  year         Int?
+  body         String   @db.Text
+  options      Json
+  correctIndex Int
+  topic        String?
+  fetchedAt    DateTime @default(now())
+
+  @@index([subject, examType, year])
 }

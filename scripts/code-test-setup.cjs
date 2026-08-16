@@ -50,11 +50,13 @@ async function main() {
     update: {},
     create: { name: 'Code Academy (test)', slug: 'code-academy-test' },
   });
-  await prisma.orgPlugin.upsert({
-    where: { organizationId_pluginKey: { organizationId: codeOrg.id, pluginKey: 'code-instruction' } },
-    update: {},
-    create: { organizationId: codeOrg.id, pluginKey: 'code-instruction' },
-  });
+  for (const pluginKey of ['code-instruction', 'test-prep']) {
+    await prisma.orgPlugin.upsert({
+      where: { organizationId_pluginKey: { organizationId: codeOrg.id, pluginKey } },
+      update: {},
+      create: { organizationId: codeOrg.id, pluginKey },
+    });
+  }
 
   const codeInstr = await verifiedUser('instructor@livetich.dev', 'Ada Okoro', 'INSTRUCTOR', codeOrg.id);
   const codeStudent = await verifiedUser('seedstudent1@livetich.dev', 'Student 1', 'STUDENT', codeOrg.id);
@@ -67,6 +69,25 @@ async function main() {
     create: { courseId: codeCourse.id, studentId: codeStudent.id },
   });
 
+  // An assignment tied to the live session — this is what the VSCode extension
+  // submits to (GET /assignments/mine → POST /assignments/:id/submissions).
+  const codeTitle = 'Implement a Vec-backed stack';
+  let codeAssignment = await prisma.assignment.findFirst({
+    where: { title: codeTitle, courseId: codeCourse.id },
+  });
+  if (!codeAssignment) {
+    codeAssignment = await prisma.assignment.create({
+      data: {
+        courseId: codeCourse.id,
+        sessionId: codeSession.id,
+        title: codeTitle,
+        instructions: 'Write a generic stack backed by a Vec, with push/pop/peek. Submit the .rs file from the Livetich VSCode extension.',
+        maxPoints: 100,
+        createdById: codeInstr.id,
+      },
+    });
+  }
+
   // --- Org WITHOUT the pack (negative gate) ---
   const plainOrg = await prisma.organization.upsert({
     where: { slug: 'plain-academy-test' },
@@ -74,16 +95,20 @@ async function main() {
     create: { name: 'Plain Academy (test)', slug: 'plain-academy-test' },
   });
   const plainInstr = await verifiedUser('grace@livetich.dev', 'Grace Adeyemi', 'INSTRUCTOR', plainOrg.id);
-  const { session: plainSession } = await liveCourseWithSession(
+  const { course: plainCourse, session: plainSession } = await liveCourseWithSession(
     'System Design: Scaling to 1M Users', plainInstr.id, plainOrg.id, 'codetest-plain',
   );
 
   console.log(JSON.stringify({
     codeSessionId: codeSession.id,
+    codeCourseId: codeCourse.id,
+    codeAssignmentId: codeAssignment.id,
     plainSessionId: plainSession.id,
+    plainCourseId: plainCourse.id,
     instructor: 'instructor@livetich.dev',
     student: 'seedstudent1@livetich.dev',
     plainInstructor: 'grace@livetich.dev',
+    password: 'password123',
   }, null, 2));
 }
 
