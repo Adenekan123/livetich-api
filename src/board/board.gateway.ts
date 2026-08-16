@@ -54,6 +54,9 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server!: BoardServer;
 
+  /** Sessions where the instructor has opened the board for students to draw. */
+  private readonly writable = new Set<string>();
+
   constructor(
     private readonly jwt: JwtService,
     private readonly prisma: PrismaService,
@@ -147,6 +150,27 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
         update: Buffer.from(state),
       });
     }
+    // Tell the joiner whether students may currently draw.
+    client.emit('board:writable', {
+      sessionId: p.sessionId,
+      open: this.writable.has(p.sessionId),
+    });
+  }
+
+  /** Instructor opens/closes the board for student drawing ("come to the
+   *  board"). Broadcast so every client flips its editor read-only state. */
+  @SubscribeMessage('board:writable')
+  onWritable(
+    @ConnectedSocket() client: BoardSocket,
+    @MessageBody() p: { sessionId: string; open: boolean },
+  ) {
+    if (!this.inRoom(client, p.sessionId)) return;
+    if (client.data.user.role !== Role.INSTRUCTOR) return;
+    if (p.open) this.writable.add(p.sessionId);
+    else this.writable.delete(p.sessionId);
+    this.server
+      .to(p.sessionId)
+      .emit('board:writable', { sessionId: p.sessionId, open: p.open });
   }
 
   @SubscribeMessage('board:leave')
@@ -165,8 +189,11 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() p: { sessionId: string; update: BoardBinary },
   ) {
     if (!this.inRoom(client, p.sessionId)) return;
-    // Join already proved ownership for instructors, so role alone gates writes.
-    if (client.data.user.role !== Role.INSTRUCTOR) {
+    // Instructor always writes; students only while the board is opened.
+    if (
+      client.data.user.role !== Role.INSTRUCTOR &&
+      !this.writable.has(p.sessionId)
+    ) {
       return this.fail(client, 'FORBIDDEN', 'The board is read-only');
     }
     const update = this.toBytes(p.update);
@@ -189,6 +216,7 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
       sessionId: string;
       camera: { x: number; y: number; z: number };
       cursor: { x: number; y: number } | null;
+      page?: string;
     },
   ) {
     if (!this.inRoom(client, p.sessionId)) return;
@@ -197,6 +225,7 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
       sessionId: p.sessionId,
       camera: p.camera,
       cursor: p.cursor,
+      page: p.page,
     });
   }
 

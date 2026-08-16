@@ -173,6 +173,8 @@ export interface BoardPresenter {
   sessionId: string;
   camera: { x: number; y: number; z: number };
   cursor: { x: number; y: number } | null;
+  /** The presenter's current page id, so followers flip pages together. */
+  page?: string;
 }
 
 export interface BoardClientToServerEvents {
@@ -184,6 +186,8 @@ export interface BoardClientToServerEvents {
   'board:awareness': (p: { sessionId: string; update: BoardBinary }) => void;
   /** Instructor-only: live camera + pointer for presenter tools. */
   'board:presenter': (p: BoardPresenter) => void;
+  /** Instructor-only: open/close the board for student drawing. */
+  'board:writable': (p: { sessionId: string; open: boolean }) => void;
 }
 
 export interface BoardServerToClientEvents {
@@ -192,6 +196,7 @@ export interface BoardServerToClientEvents {
   'board:update': (p: { sessionId: string; update: BoardBinary }) => void;
   'board:awareness': (p: { sessionId: string; update: BoardBinary }) => void;
   'board:presenter': (p: BoardPresenter) => void;
+  'board:writable': (p: { sessionId: string; open: boolean }) => void;
 
   error: (p: { code: string; message: string }) => void;
 }
