@@ -166,7 +166,43 @@ export class ExamsService {
     });
   }
 
-  /** Begin (or resume) a timed attempt. Returns questions WITHOUT answers. */
+  /** The student's most recent submitted attempt, with the answer key + what
+   *  they picked — for post-exam review. */
+  async getReview(user: JwtPayload, examId: string) {
+    const attempt = await this.prisma.examAttempt.findFirst({
+      where: { examId, studentId: user.sub, submittedAt: { not: null } },
+      orderBy: { submittedAt: 'desc' },
+      include: {
+        answers: true,
+        exam: {
+          include: {
+            questions: {
+              orderBy: { order: 'asc' },
+              select: { id: true, body: true, options: true, correctIndex: true },
+            },
+          },
+        },
+      },
+    });
+    if (!attempt) throw new NotFoundException('No submitted attempt to review');
+    const chosen = new Map(attempt.answers.map((a) => [a.questionId, a.chosenIndex]));
+    return {
+      examTitle: attempt.exam.title,
+      score: attempt.score,
+      total: attempt.exam.questions.length,
+      submittedAt: attempt.submittedAt,
+      questions: attempt.exam.questions.map((q) => ({
+        id: q.id,
+        body: q.body,
+        options: q.options as string[],
+        correctIndex: q.correctIndex,
+        chosenIndex: chosen.get(q.id) ?? null,
+      })),
+    };
+  }
+
+  /** Begin (or resume) a timed attempt. Returns questions WITHOUT answers.
+   *  A prior submitted attempt doesn't block a fresh one — retakes are allowed. */
   async startAttempt(user: JwtPayload, examId: string) {
     const exam = await this.prisma.exam.findUnique({
       where: { id: examId },
@@ -194,6 +230,7 @@ export class ExamsService {
     );
     return {
       attemptId: attempt.id,
+      examId,
       title: exam.title,
       durationMinutes: exam.durationMinutes,
       deadline: deadline.toISOString(),

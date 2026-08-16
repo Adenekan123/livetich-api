@@ -75,6 +75,11 @@ export class ExamsController {
     return this.exams.listAvailable(user, courseId);
   }
 
+  @Get('exams/:examId/review')
+  review(@CurrentUser() user: JwtPayload, @Param('examId') examId: string) {
+    return this.exams.getReview(user, examId);
+  }
+
   @Post('exams/:examId/attempts')
   @HttpCode(200)
   start(@CurrentUser() user: JwtPayload, @Param('examId') examId: string) {
