@@ -121,7 +121,9 @@ export class AssessmentController {
   // ---------- AI drafting: documents + draft (manager) ----------
 
   @Post('courses/:courseId/assessment/documents')
-  @UseInterceptors(FileInterceptor('file'))
+  // Cap at the multer layer so an oversized upload is aborted mid-stream
+  // rather than buffered whole into memory.
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 30 * 1024 * 1024 } }))
   uploadDocument(
     @CurrentUser() user: JwtPayload,
     @Param('courseId') courseId: string,

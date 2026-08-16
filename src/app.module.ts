@@ -2,10 +2,11 @@ import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
-import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuthCacheModule } from './auth/auth-cache.service';
+import { UserOrIpThrottlerGuard } from './auth/user-throttler.guard';
 import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
 import { StorageModule } from './storage/storage.module';
@@ -75,6 +76,9 @@ import { RealtimeModule } from './realtime/realtime.module';
     RealtimeModule,
   ],
   controllers: [AppController],
-  providers: [AppService, { provide: APP_GUARD, useClass: ThrottlerGuard }],
+  providers: [
+    AppService,
+    { provide: APP_GUARD, useClass: UserOrIpThrottlerGuard },
+  ],
 })
 export class AppModule {}

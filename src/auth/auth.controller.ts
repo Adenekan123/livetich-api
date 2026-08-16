@@ -61,6 +61,15 @@ export class AuthController {
     return user;
   }
 
+  /** Short-lived token for realtime clients (see AuthService.mintRealtimeToken).
+   *  Fetched on every socket (re)connect, so it gets a looser limit. */
+  @Throttle({ default: { limit: 60, ttl: 60_000 } })
+  @HttpCode(200)
+  @Post('realtime-token')
+  realtimeToken(@CurrentUser() user: JwtPayload) {
+    return this.auth.mintRealtimeToken(user);
+  }
+
   /** Sends (or resends) the 6-digit verification code to the current user. */
   @AllowUnverified()
   @Throttle({ default: { limit: 4, ttl: 60_000 } }) // email send — anti-bombing

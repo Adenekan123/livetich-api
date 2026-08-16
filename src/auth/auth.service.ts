@@ -8,8 +8,8 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { Invite, Role, UserStatus } from '@prisma/client';
-import * as bcrypt from 'bcryptjs';
-import { createHash, randomBytes } from 'crypto';
+import { hash as bcryptHash, verify as bcryptVerify } from '@node-rs/bcrypt';
+import { createHash, randomBytes, randomInt } from 'crypto';
 import { MailService } from '../mail/mail.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthCacheService } from './auth-cache.service';
@@ -85,7 +85,7 @@ export class AuthService {
     await this.prisma.user.update({
       where: { id: user.id },
       data: {
-        passwordHash: await bcrypt.hash(newPassword, BCRYPT_ROUNDS),
+        passwordHash: await bcryptHash(newPassword, BCRYPT_ROUNDS),
         resetTokenHash: null,
         resetTokenExpiresAt: null,
       },
@@ -95,7 +95,7 @@ export class AuthService {
   /** Student/instructor signup, gated by an org invite link. */
   async register(dto: RegisterDto): Promise<AuthResult> {
     await this.assertEmailFree(dto.email);
-    const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
+    const passwordHash = await bcryptHash(dto.password, BCRYPT_ROUNDS);
 
     // Validate + consume the invite atomically so maxUses can't be raced.
     const user = await this.prisma.$transaction(async (tx) => {
@@ -126,7 +126,7 @@ export class AuthService {
   /** Company signup — creates the Organization and its first ORG_ADMIN. */
   async registerOrganization(dto: RegisterOrganizationDto): Promise<AuthResult> {
     await this.assertEmailFree(dto.email);
-    const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
+    const passwordHash = await bcryptHash(dto.password, BCRYPT_ROUNDS);
     const slug = await this.uniqueSlug(dto.organizationName);
 
     const user = await this.prisma.$transaction(async (tx) => {
@@ -158,11 +158,11 @@ export class AuthService {
   async changePassword(userId: string, currentPassword: string, newPassword: string) {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new UnauthorizedException('Not signed in');
-    const ok = await bcrypt.compare(currentPassword, user.passwordHash);
+    const ok = await bcryptVerify(currentPassword, user.passwordHash);
     if (!ok) throw new BadRequestException('Current password is incorrect');
     await this.prisma.user.update({
       where: { id: userId },
-      data: { passwordHash: await bcrypt.hash(newPassword, BCRYPT_ROUNDS) },
+      data: { passwordHash: await bcryptHash(newPassword, BCRYPT_ROUNDS) },
     });
     return { ok: true };
   }
@@ -176,7 +176,7 @@ export class AuthService {
     const hash =
       user?.passwordHash ??
       '$2a$12$C6UzMDM.H6dfI/f/IKcEeO7ZBpDLbIRasWM3zL8XoJv1LZv1B1O2y';
-    const ok = await bcrypt.compare(dto.password, hash);
+    const ok = await bcryptVerify(dto.password, hash);
     if (!user || !ok) throw new UnauthorizedException('Invalid credentials');
     if (user.status === UserStatus.DISABLED) {
       throw new ForbiddenException('This account has been disabled');
@@ -258,6 +258,24 @@ export class AuthService {
     };
   }
 
+  /**
+   * A short-lived token for realtime clients (Socket.IO + LiveKit). The web
+   * hands this to browser JS instead of the 7-day session cookie, so an XSS
+   * (if one ever slips past) steals a token that expires in minutes, not days.
+   * Sockets re-fetch it on every (re)connect, so the short TTL is transparent.
+   */
+  mintRealtimeToken(user: JwtPayload): { token: string } {
+    const payload: JwtPayload = {
+      sub: user.sub,
+      role: user.role,
+      name: user.name,
+      email: user.email,
+      organizationId: user.organizationId,
+      emailVerified: user.emailVerified,
+    };
+    return { token: this.jwt.sign(payload, { expiresIn: '15m' }) };
+  }
+
   // ---------- Email verification (6-digit OTP) ----------
 
   /** Emails a fresh 6-digit code (10-min expiry) to the user's address. */
@@ -265,7 +283,8 @@ export class AuthService {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user || user.emailVerified) return;
 
-    const code = String(Math.floor(100000 + Math.random() * 900000));
+    // crypto.randomInt (CSPRNG) — a predictable RNG would weaken the OTP.
+    const code = String(randomInt(100000, 1000000));
     await this.prisma.user.update({
       where: { id: userId },
       data: {

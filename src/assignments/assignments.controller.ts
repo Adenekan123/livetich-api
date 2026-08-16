@@ -83,7 +83,9 @@ export class AssignmentsController {
   /** Student uploads a recitation audio (or image/PDF) as their submission. */
   @Post('assignments/:id/submissions/upload')
   @Roles(Role.STUDENT)
-  @UseInterceptors(FileInterceptor('file'))
+  // Cap at the multer layer so an oversized upload is aborted mid-stream
+  // instead of buffered whole into memory (the service re-checks size too).
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 30 * 1024 * 1024 } }))
   uploadSubmission(
     @CurrentUser() user: JwtPayload,
     @Param('id') id: string,
