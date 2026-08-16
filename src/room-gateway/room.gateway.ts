@@ -27,6 +27,11 @@ import type {
 } from '../shared';
 import { RoomStateService } from './room-state.service';
 import { RoomBroadcaster, staffRoom } from '../realtime/room-broadcaster';
+import { PluginsService } from '../plugins/plugins.service';
+import {
+  PLUGIN_CODE_INSTRUCTION,
+  PLUGIN_ISLAMIC_EDUCATION,
+} from '../plugins/catalog';
 
 interface SocketData {
   user: JwtPayload;
@@ -77,6 +82,7 @@ export class RoomGateway
     private readonly livekit: LivekitService,
     private readonly authCache: AuthCacheService,
     private readonly broadcaster: RoomBroadcaster,
+    private readonly plugins: PluginsService,
   ) {}
 
   // Hand the socket server to the broadcaster so HTTP code can push into rooms.
@@ -156,7 +162,11 @@ export class RoomGateway
     const user = client.data.user;
     const session = await this.prisma.liveSession.findUnique({
       where: { id: p.sessionId },
-      include: { course: { select: { id: true, instructorId: true } } },
+      include: {
+        course: {
+          select: { id: true, instructorId: true, organizationId: true },
+        },
+      },
     });
     if (!session || session.status === SessionStatus.ENDED) {
       return this.fail(client, 'NOT_JOINABLE', 'Session not found or ended');
@@ -199,15 +209,25 @@ export class RoomGateway
       sessionId: p.sessionId,
       view: await this.state.getView(p.sessionId),
     });
-    // Open the shared mushaf wherever the class last stopped reciting — seeded
-    // once for a fresh room (SETNX-style), so it never overrides the
-    // instructor's live page nor re-jumps on a reconnect.
-    if (!(await this.state.hasQuranPos(p.sessionId))) {
-      const anchor = await this.lastRecitationAnchor(session.course.id);
-      if (anchor) await this.state.setQuranPos(p.sessionId, anchor);
+    // The shared mushaf is an Islamic Education pack surface — only seed/emit
+    // its position for orgs that have the pack on. A plain classroom never
+    // opens the reader (see the matching web + view:change gates).
+    if (
+      await this.plugins.isEnabled(
+        session.course.organizationId,
+        PLUGIN_ISLAMIC_EDUCATION,
+      )
+    ) {
+      // Open the shared mushaf wherever the class last stopped reciting — seeded
+      // once for a fresh room (SETNX-style), so it never overrides the
+      // instructor's live page nor re-jumps on a reconnect.
+      if (!(await this.state.hasQuranPos(p.sessionId))) {
+        const anchor = await this.lastRecitationAnchor(session.course.id);
+        if (anchor) await this.state.setQuranPos(p.sessionId, anchor);
+      }
+      const pos = await this.state.getQuranPos(p.sessionId);
+      client.emit('quran:position', { sessionId: p.sessionId, ...pos });
     }
-    const pos = await this.state.getQuranPos(p.sessionId);
-    client.emit('quran:position', { sessionId: p.sessionId, ...pos });
     await this.broadcastHands(p.sessionId, client);
     await this.sendChatHistory(p.sessionId, client);
   }
@@ -308,11 +328,22 @@ export class RoomGateway
     @MessageBody()
     p: { sessionId: string; view: 'video' | 'board' | 'quran' | 'code' },
   ) {
-    if (!(await this.isOwner(client, p.sessionId))) return;
+    const session = await this.ownedSession(client, p.sessionId);
+    if (!session) return;
     const view =
       p.view === 'board' || p.view === 'quran' || p.view === 'code'
         ? p.view
         : 'video';
+    // Pack-gated stages: the mushaf needs Islamic Education, the shared code
+    // editor needs Code Instruction. Reject rather than silently downgrade so a
+    // mis-wired client surfaces the problem.
+    if (view === 'quran' || view === 'code') {
+      const key =
+        view === 'quran' ? PLUGIN_ISLAMIC_EDUCATION : PLUGIN_CODE_INSTRUCTION;
+      if (!(await this.plugins.isEnabled(session.course.organizationId, key))) {
+        return this.fail(client, 'PLUGIN_DISABLED', 'Add-on not enabled');
+      }
+    }
     await this.state.setView(p.sessionId, view);
     this.server
       .to(p.sessionId)
@@ -324,7 +355,18 @@ export class RoomGateway
     @ConnectedSocket() client: RoomSocket,
     @MessageBody() p: { sessionId: string; surah: number; ayah: number },
   ) {
-    if (!(await this.isOwner(client, p.sessionId))) return;
+    const session = await this.ownedSession(client, p.sessionId);
+    if (!session) return;
+    // The mushaf is an Islamic Education surface — reject navigation for orgs
+    // without the pack, even though the UI already hides the control.
+    if (
+      !(await this.plugins.isEnabled(
+        session.course.organizationId,
+        PLUGIN_ISLAMIC_EDUCATION,
+      ))
+    ) {
+      return this.fail(client, 'PLUGIN_DISABLED', 'Add-on not enabled');
+    }
     // Clamp to the valid mushaf range; the client picks from the catalog, but
     // never trust it — an out-of-range verse would blank every student's page.
     const surah = Math.min(114, Math.max(1, Math.trunc(Number(p.surah) || 1)));
@@ -645,7 +687,9 @@ export class RoomGateway
     }
     const session = await this.prisma.liveSession.findUnique({
       where: { id: sessionId },
-      include: { course: { select: { instructorId: true } } },
+      include: {
+        course: { select: { instructorId: true, organizationId: true } },
+      },
     });
     if (!session || session.course.instructorId !== user.sub) {
       this.fail(client, 'FORBIDDEN', 'Not your session');
