@@ -7,6 +7,7 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuthCacheModule } from './auth/auth-cache.service';
 import { UserOrIpThrottlerGuard } from './auth/user-throttler.guard';
+import { HealthController } from './health/health.controller';
 import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
 import { StorageModule } from './storage/storage.module';
@@ -75,7 +76,7 @@ import { RealtimeModule } from './realtime/realtime.module';
     CodeModule,
     RealtimeModule,
   ],
-  controllers: [AppController],
+  controllers: [AppController, HealthController],
   providers: [
     AppService,
     { provide: APP_GUARD, useClass: UserOrIpThrottlerGuard },

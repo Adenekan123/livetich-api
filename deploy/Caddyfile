@@ -1,0 +1,17 @@
+# Auto-HTTPS via Let's Encrypt. Caddy proxies websockets (Socket.IO upgrades)
+# transparently, so no extra config is needed for the live classroom.
+{
+	email {$ACME_EMAIL}
+}
+
+# Web app
+{$APP_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy web:3000
+}
+
+# API (REST + Socket.IO). CORS is handled by the API itself (WEB_ORIGIN).
+{$API_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy api:3000
+}

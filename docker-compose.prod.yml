@@ -1,0 +1,113 @@
+# Production stack for a single VPS. Only Caddy is exposed to the internet;
+# everything else talks over the internal Docker network.
+#
+#   docker compose --env-file deploy/.env.prod -f docker-compose.prod.yml up -d --build
+#
+# Requires the livetich-web repo checked out alongside this one (../livetich-web).
+name: livetich
+
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN}
+      API_DOMAIN: ${API_DOMAIN}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - web
+      - api
+
+  web:
+    build:
+      context: ../livetich-web
+      args:
+        # NEXT_PUBLIC_* is baked in at build time — must be the PUBLIC api URL.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+    restart: unless-stopped
+    env_file: deploy/.env.prod
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      - api
+
+  api:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file: deploy/.env.prod
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+    expose:
+      - "3000"
+    volumes:
+      # Durable local-disk object storage (submissions, certs, board snapshots).
+      # Included in backups — see deploy/backup.sh.
+      - storage:/app/storage
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test:
+        ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+
+  # Optional self-hosted LiveKit — cheapest media path, but needs open UDP ports
+  # and a reachable public IP (see DEPLOY.md § LiveKit). Otherwise leave it off
+  # and point LIVEKIT_* at LiveKit Cloud's free tier.
+  #   docker compose --profile livekit --env-file deploy/.env.prod -f docker-compose.prod.yml up -d
+  livekit:
+    image: livekit/livekit-server:latest
+    profiles: ["livekit"]
+    restart: unless-stopped
+    command: ["--config", "/etc/livekit.yaml"]
+    network_mode: host
+    volumes:
+      - ./deploy/livekit.yaml:/etc/livekit.yaml:ro
+
+volumes:
+  mysql-data:
+  redis-data:
+  storage:
+  caddy-data:
+  caddy-config:

@@ -8,6 +8,9 @@ coverage/
 .env
 .env.local
 .env.*.local
+# Production secrets (keep the .example template tracked)
+deploy/.env.prod
+backups/
 
 .DS_Store
 Thumbs.db

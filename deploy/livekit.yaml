@@ -1,0 +1,13 @@
+# Self-hosted LiveKit (optional — enable with `--profile livekit`).
+# Runs with network_mode: host so WebRTC media (UDP) reaches clients. Open these
+# ports on the VPS firewall: 7880/tcp, 7881/tcp, 50000-60000/udp.
+port: 7880
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 60000
+  use_external_ip: true # discovers the public IP for ICE candidates
+keys:
+  # KEY: SECRET — must equal LIVEKIT_API_KEY / LIVEKIT_API_SECRET in .env.prod.
+  # Secret must be at least 32 characters. Generate: openssl rand -base64 32
+  REPLACE_WITH_LIVEKIT_API_KEY: REPLACE_WITH_LIVEKIT_API_SECRET
