@@ -178,6 +178,28 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
   }
 
+  /** Presenter tools: the instructor's live camera + pointer, relayed to the
+   *  room so students can follow the view and see the laser. Ephemeral — never
+   *  persisted to the board doc. Only the instructor broadcasts. */
+  @SubscribeMessage('board:presenter')
+  onPresenter(
+    @ConnectedSocket() client: BoardSocket,
+    @MessageBody()
+    p: {
+      sessionId: string;
+      camera: { x: number; y: number; z: number };
+      cursor: { x: number; y: number } | null;
+    },
+  ) {
+    if (!this.inRoom(client, p.sessionId)) return;
+    if (client.data.user.role !== Role.INSTRUCTOR) return;
+    client.to(p.sessionId).emit('board:presenter', {
+      sessionId: p.sessionId,
+      camera: p.camera,
+      cursor: p.cursor,
+    });
+  }
+
   @SubscribeMessage('board:awareness')
   onAwareness(
     @ConnectedSocket() client: BoardSocket,

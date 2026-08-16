@@ -167,6 +167,14 @@ export interface ServerToClientEvents {
 /** Yjs binary payload — Buffer on the server, ArrayBuffer in the browser. */
 export type BoardBinary = ArrayBuffer | Uint8Array;
 
+/** Presenter tools: the instructor's live camera + pointer (page coords), for
+ *  follow-the-view and the shared laser. Ephemeral; cursor null = off-canvas. */
+export interface BoardPresenter {
+  sessionId: string;
+  camera: { x: number; y: number; z: number };
+  cursor: { x: number; y: number } | null;
+}
+
 export interface BoardClientToServerEvents {
   'board:join': (p: { sessionId: string }) => void;
   'board:leave': (p: { sessionId: string }) => void;
@@ -174,6 +182,8 @@ export interface BoardClientToServerEvents {
   'board:update': (p: { sessionId: string; update: BoardBinary }) => void;
   /** Cursor/selection presence — relayed to the room, never persisted. */
   'board:awareness': (p: { sessionId: string; update: BoardBinary }) => void;
+  /** Instructor-only: live camera + pointer for presenter tools. */
+  'board:presenter': (p: BoardPresenter) => void;
 }
 
 export interface BoardServerToClientEvents {
@@ -181,6 +191,7 @@ export interface BoardServerToClientEvents {
   'board:state': (p: { sessionId: string; update: BoardBinary }) => void;
   'board:update': (p: { sessionId: string; update: BoardBinary }) => void;
   'board:awareness': (p: { sessionId: string; update: BoardBinary }) => void;
+  'board:presenter': (p: BoardPresenter) => void;
 
   error: (p: { code: string; message: string }) => void;
 }
