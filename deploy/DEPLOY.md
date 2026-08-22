@@ -124,10 +124,11 @@ company sign-up (`https://app.example.com/register-organization`, i.e. API
 - **With Resend configured** → it's emailed.
 - **Without** → it's written to the API log: `docker compose logs api | grep -i otp`.
 
-Seed the plugin catalog once so orgs can enable add-ons:
-```bash
-docker compose -f docker-compose.prod.yml exec api node scripts/seed-catalog.cjs
-```
+The add-on catalog (Islamic Education, Test Prep, Code Instruction) ships **in
+code** (`src/plugins/catalog.ts`) — there is nothing to seed. Each org turns
+packs on from the **Add-ons** page after signing up. (`scripts/seed-catalog.cjs`
+is a **dev-only demo seeder** — fake instructors and sample courses — and is not
+shipped in the production image. Do not run it against a real instance.)
 
 ## 5. TLS
 
