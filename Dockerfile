@@ -11,6 +11,11 @@ RUN pnpm install --frozen-lockfile
 # ---- build: prisma client + compile TS ----
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
+# openssl so `prisma generate` detects the OpenSSL version correctly (the slim
+# image omits it; without it Prisma picks the wrong engine → runtime mismatch).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssl \
+ && rm -rf /var/lib/apt/lists/*
 RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .

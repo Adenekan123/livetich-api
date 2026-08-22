@@ -1,5 +1,9 @@
 generator client {
   provider = "prisma-client-js"
+  // Explicit engine for the Debian 12 (OpenSSL 3.0) runtime container, so the
+  // client always ships the right query engine even if `native` mis-detects
+  // during the Docker build. See Dockerfile (openssl installed in build stage).
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
 }
 
 datasource db {
