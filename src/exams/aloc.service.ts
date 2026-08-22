@@ -2,6 +2,7 @@ import {
   BadGatewayException,
   Injectable,
   Logger,
+  NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -165,6 +166,14 @@ export class AlocService {
     }
 
     const payload = (await res.json().catch(() => null)) as AlocResponse | null;
+    // ALOC 404s subjects/exam-types it doesn't carry (e.g. it serves `jamb`,
+    // `waec`, `post_utme` but not `neco`). Surface that as a clear, actionable
+    // message instead of a generic 502 "ALOC error: not_found".
+    if (res.status === 404) {
+      throw new NotFoundException(
+        `No ALOC questions for "${subject}" (${examType}). Try a different subject or exam type.`,
+      );
+    }
     if (!res.ok || !payload) {
       const msg = payload?.error || payload?.message || `HTTP ${res.status}`;
       throw new BadGatewayException(`ALOC error: ${msg}`);

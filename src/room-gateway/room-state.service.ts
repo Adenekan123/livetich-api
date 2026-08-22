@@ -3,9 +3,11 @@ import Redis from 'ioredis';
 import type {
   BuzzerState,
   QuranPosition,
+  RoomScheme,
   RoomUser,
   StageView,
 } from '../shared';
+import { ROOM_SCHEMES } from '../shared';
 import { REDIS } from '../redis/redis.module';
 
 /**
@@ -66,6 +68,24 @@ export class RoomStateService {
     return v === 'board' || v === 'quran' || v === 'code' ? v : 'video';
   }
 
+  // ---------- Room colour scheme (instructor-driven) ----------
+
+  async setTheme(sessionId: string, scheme: RoomScheme) {
+    await this.redis.set(
+      this.k(sessionId, 'theme'),
+      scheme,
+      'EX',
+      RoomStateService.TTL,
+    );
+  }
+
+  async getTheme(sessionId: string): Promise<RoomScheme> {
+    const v = await this.redis.get(this.k(sessionId, 'theme'));
+    return (ROOM_SCHEMES as readonly string[]).includes(v ?? '')
+      ? (v as RoomScheme)
+      : 'teal';
+  }
+
   // ---------- Shared mushaf position (instructor-driven) ----------
 
   async setQuranPos(sessionId: string, pos: QuranPosition) {
@@ -117,6 +137,22 @@ export class RoomStateService {
     const pick = userIds[Math.floor(Math.random() * userIds.length)];
     const raw = await this.redis.hget(key, pick);
     return raw ? (JSON.parse(raw) as RoomUser) : null;
+  }
+
+  // ---------- Mic speakers (students the instructor has granted the mic) ----------
+
+  async grantMic(sessionId: string, userId: string) {
+    const key = this.k(sessionId, 'speakers');
+    await this.redis.sadd(key, userId);
+    await this.redis.expire(key, RoomStateService.TTL);
+  }
+
+  async revokeMic(sessionId: string, userId: string) {
+    await this.redis.srem(this.k(sessionId, 'speakers'), userId);
+  }
+
+  async listSpeakers(sessionId: string): Promise<string[]> {
+    return this.redis.smembers(this.k(sessionId, 'speakers'));
   }
 
   // ---------- Buzzer ----------

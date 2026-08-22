@@ -5,9 +5,10 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, Role } from '@prisma/client';
+import { PointsReason, Prisma, Role } from '@prisma/client';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { CoursesService } from '../courses/courses.service';
+import { PointsService } from '../points/points.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { OBJECT_STORAGE } from '../storage/object-storage';
 import type { ObjectStorage } from '../storage/object-storage';
@@ -26,6 +27,7 @@ export class AssignmentsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly courses: CoursesService,
+    private readonly points: PointsService,
     @Inject(OBJECT_STORAGE) private readonly storage: ObjectStorage,
     private readonly broadcaster: RoomBroadcaster,
   ) {}
@@ -223,6 +225,7 @@ export class AssignmentsService {
     return assignments.map((a) => ({
       id: a.id,
       title: a.title,
+      courseId: a.courseId,
       courseTitle: a.course.title,
       sessionId: a.sessionId,
       sessionLive: a.session?.status === 'LIVE',
@@ -419,18 +422,57 @@ export class AssignmentsService {
   async grade(user: JwtPayload, submissionId: string, dto: GradeSubmissionDto) {
     const submission = await this.prisma.submission.findUnique({
       where: { id: submissionId },
-      select: { id: true, assignmentId: true },
+      select: {
+        id: true,
+        assignmentId: true,
+        studentId: true,
+        assignment: { select: { courseId: true } },
+      },
     });
     if (!submission) throw new NotFoundException('Submission not found');
     await this.getManageable(user, submission.assignmentId);
-    return this.prisma.submission.update({
-      where: { id: submissionId },
-      data: {
-        grade: dto.grade,
-        feedback: dto.feedback,
-        gradedById: user.sub,
-        gradedAt: new Date(),
+
+    const { studentId } = submission;
+    const courseId = submission.assignment.courseId;
+
+    // A graded submission contributes its grade to the course leaderboard. The
+    // ledger is append-only, so on a re-grade we post only the difference from
+    // what this submission previously awarded — the student's net stays == grade.
+    const prior = await this.prisma.pointsLedger.aggregate({
+      where: {
+        studentId,
+        courseId,
+        reason: PointsReason.ASSIGNMENT_GRADED,
+        refId: submissionId,
       },
+      _sum: { delta: true },
+    });
+    const alreadyAwarded = prior._sum.delta ?? 0;
+    const netDelta = dto.grade - alreadyAwarded;
+
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.submission.update({
+        where: { id: submissionId },
+        data: {
+          grade: dto.grade,
+          feedback: dto.feedback,
+          gradedById: user.sub,
+          gradedAt: new Date(),
+        },
+      });
+      if (netDelta !== 0) {
+        await this.points.award(
+          {
+            studentId,
+            courseId,
+            delta: netDelta,
+            reason: PointsReason.ASSIGNMENT_GRADED,
+            refId: submissionId,
+          },
+          tx,
+        );
+      }
+      return updated;
     });
   }
 

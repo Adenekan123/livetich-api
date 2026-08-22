@@ -38,6 +38,13 @@ export class CreateQuizQuestionDto {
   @Min(5)
   @Max(600)
   timeLimitSec?: number;
+
+  /** Points the first correct answerer earns (buzzer); instructor-set. */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(1000)
+  points?: number;
 }
 
 export class CreateQuizDto {
@@ -49,6 +56,11 @@ export class CreateQuizDto {
   @IsOptional()
   @IsString()
   sessionId?: string;
+
+  /** Attach directly to a course (reusable buzzer bank, no session needed). */
+  @IsOptional()
+  @IsString()
+  courseId?: string;
 
   @IsEnum(QuizType)
   type!: QuizType;

@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Post,
@@ -28,9 +29,23 @@ export class QuizController {
   /** Declared before :id so "quizzes?sessionId=…" isn't matched as an id. */
   @Get()
   @Roles(Role.INSTRUCTOR)
-  list(@CurrentUser() user: JwtPayload, @Query('sessionId') sessionId: string) {
-    if (!sessionId) throw new BadRequestException('sessionId is required');
-    return this.quiz.listForSession(user.sub, sessionId);
+  list(
+    @CurrentUser() user: JwtPayload,
+    @Query('sessionId') sessionId?: string,
+    @Query('courseId') courseId?: string,
+  ) {
+    if (courseId) return this.quiz.listForCourse(user.sub, courseId);
+    if (sessionId) return this.quiz.listForSession(user.sub, sessionId);
+    throw new BadRequestException('sessionId or courseId is required');
+  }
+
+  @Delete('questions/:questionId')
+  @Roles(Role.INSTRUCTOR)
+  deleteQuestion(
+    @CurrentUser() user: JwtPayload,
+    @Param('questionId') questionId: string,
+  ) {
+    return this.quiz.deleteQuestion(user.sub, questionId);
   }
 
   @Get(':id')

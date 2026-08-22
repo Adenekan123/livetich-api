@@ -35,6 +35,7 @@ enum PointsReason {
   QUIZ_CORRECT
   BUZZER_WIN
   PARTICIPATION
+  ASSIGNMENT_GRADED
 }
 
 /// Lifecycle of a remediation task auto-assigned after a missed topic.
@@ -87,6 +88,9 @@ model Invite {
   id             String    @id @default(cuid())
   organizationId String
   role           Role // STUDENT or INSTRUCTOR
+  /// When set, the link is scoped to one program: a STUDENT is auto-enrolled on
+  /// join, an INSTRUCTOR is assigned to teach it. Null = a plain workspace link.
+  courseId       String?
   token          String    @unique
   label          String?
   createdById    String
@@ -98,8 +102,10 @@ model Invite {
 
   organization Organization @relation(fields: [organizationId], references: [id])
   createdBy    User         @relation("inviteCreator", fields: [createdById], references: [id])
+  course       Course?      @relation(fields: [courseId], references: [id], onDelete: Cascade)
 
   @@index([organizationId])
+  @@index([courseId])
 }
 
 model User {
@@ -170,12 +176,14 @@ model Course {
   instructor   User?          @relation("instructor", fields: [instructorId], references: [id])
   sections     Section[]
   enrollments  Enrollment[]
+  invites      Invite[]
   sessions     LiveSession[]
   points       PointsLedger[]
   certificates Certificate[]
   assignments  Assignment[]
   studentGroups StudentGroup[]
   assessmentQuestions AssessmentQuestion[]
+  quizzes      Quiz[]
   remediationTasks    RemediationTask[]
   assessments         Assessment[]
   documents           CourseDocument[]
@@ -337,6 +345,9 @@ model ChatMessage {
   sessionId String
   userId    String
   body      String   @db.Text
+  /// Same-origin URL of an attached voice note (audio blob in object storage).
+  /// Null for plain text messages.
+  audioUrl  String?  @db.Text
   createdAt DateTime @default(now())
 
   session LiveSession @relation(fields: [sessionId], references: [id])
@@ -349,12 +360,18 @@ model Quiz {
   id        String   @id @default(cuid())
   sectionId String?
   sessionId String?
+  /// Course-scoped quizzes (e.g. a reusable buzzer bank) attach here directly,
+  /// so they exist before any session materializes.
+  courseId  String?
   type      QuizType
   createdAt DateTime @default(now())
 
   section   Section?       @relation(fields: [sectionId], references: [id])
   session   LiveSession?   @relation(fields: [sessionId], references: [id])
+  course    Course?        @relation(fields: [courseId], references: [id], onDelete: Cascade)
   questions QuizQuestion[]
+
+  @@index([courseId])
 }
 
 model QuizQuestion {
@@ -365,6 +382,8 @@ model QuizQuestion {
   options      Json
   correctIndex Int
   timeLimitSec Int    @default(60)
+  /// Points the first correct answerer earns (instructor-set per buzzer question).
+  points       Int    @default(25)
 
   quiz    Quiz         @relation(fields: [quizId], references: [id])
   answers QuizAnswer[]

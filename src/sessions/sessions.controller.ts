@@ -49,6 +49,18 @@ export class SessionsController {
     return this.sessions.resolveCourseSession(user, courseId);
   }
 
+  /** Attendance sheet for a course — instructor-owner or org-admin only.
+   *  `sessionId` filters to one session; omit to default to the latest.
+   *  Declared before :id so "course" isn't matched as a session id. */
+  @Get('course/:courseId/attendance')
+  attendance(
+    @CurrentUser() user: JwtPayload,
+    @Param('courseId') courseId: string,
+    @Query('sessionId') sessionId?: string,
+  ) {
+    return this.sessions.attendanceForCourse(user, courseId, sessionId);
+  }
+
   @Public()
   @Get(':id')
   get(@Param('id') id: string) {

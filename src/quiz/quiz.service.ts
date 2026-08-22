@@ -5,7 +5,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { PointsReason, Prisma, Role } from '@prisma/client';
+import { PointsReason, Prisma, QuizType, Role } from '@prisma/client';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { CoursesService } from '../courses/courses.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -36,6 +36,7 @@ export class QuizService {
       data: {
         sectionId: dto.sectionId,
         sessionId: dto.sessionId,
+        courseId,
         type: dto.type,
         questions: {
           create: dto.questions.map((q) => ({
@@ -45,6 +46,7 @@ export class QuizService {
             ...(q.timeLimitSec !== undefined && {
               timeLimitSec: q.timeLimitSec,
             }),
+            ...(q.points !== undefined && { points: q.points }),
           })),
         },
       },
@@ -60,11 +62,56 @@ export class QuizService {
     });
     if (!session) throw new NotFoundException('Session not found');
     await this.courses.assertCourseOwner(instructorId, session.courseId);
+    // The live-room buzzer draws from the course's reusable bank as well as any
+    // question tied straight to this session, so a class always has something to
+    // run even when nothing was pre-authored for this exact session.
     return this.prisma.quiz.findMany({
-      where: { sessionId },
+      where: { OR: [{ sessionId }, { courseId: session.courseId }] },
       include: { questions: true },
       orderBy: { createdAt: 'asc' },
     });
+  }
+
+  /** The course's reusable buzzer bank (owner-only) — powers the dashboard manager. */
+  async listForCourse(instructorId: string, courseId: string) {
+    await this.courses.assertCourseOwner(instructorId, courseId);
+    return this.prisma.quiz.findMany({
+      where: { courseId, type: QuizType.BUZZER },
+      include: { questions: true },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  /** Remove a single buzzer question (and its parent quiz if it was the last one). */
+  async deleteQuestion(instructorId: string, questionId: string) {
+    const question = await this.prisma.quizQuestion.findUnique({
+      where: { id: questionId },
+      include: {
+        quiz: { select: { id: true, courseId: true, sessionId: true } },
+      },
+    });
+    if (!question) throw new NotFoundException('Question not found');
+    const courseId =
+      question.quiz.courseId ??
+      (question.quiz.sessionId
+        ? (
+            await this.prisma.liveSession.findUnique({
+              where: { id: question.quiz.sessionId },
+              select: { courseId: true },
+            })
+          )?.courseId
+        : undefined);
+    if (!courseId) throw new NotFoundException('Question not found');
+    await this.courses.assertCourseOwner(instructorId, courseId);
+
+    await this.prisma.quizQuestion.delete({ where: { id: questionId } });
+    const remaining = await this.prisma.quizQuestion.count({
+      where: { quizId: question.quiz.id },
+    });
+    if (remaining === 0) {
+      await this.prisma.quiz.delete({ where: { id: question.quiz.id } });
+    }
+    return { ok: true };
   }
 
   /** Instructors who own the quiz see correctIndex; students never do. */
@@ -183,11 +230,14 @@ export class QuizService {
   // ---------- Helpers ----------
 
   private async resolveCourseId(dto: CreateQuizDto): Promise<string> {
-    if (!dto.sectionId && !dto.sessionId) {
-      throw new BadRequestException('sectionId or sessionId is required');
+    if (!dto.sectionId && !dto.sessionId && !dto.courseId) {
+      throw new BadRequestException(
+        'sectionId, sessionId or courseId is required',
+      );
     }
     let fromSection: string | undefined;
     let fromSession: string | undefined;
+    let fromCourse: string | undefined;
 
     if (dto.sectionId) {
       const section = await this.prisma.section.findUnique({
@@ -205,12 +255,21 @@ export class QuizService {
       if (!session) throw new NotFoundException('Session not found');
       fromSession = session.courseId;
     }
-    if (fromSection && fromSession && fromSection !== fromSession) {
+    if (dto.courseId) {
+      const course = await this.prisma.course.findUnique({
+        where: { id: dto.courseId },
+        select: { id: true },
+      });
+      if (!course) throw new NotFoundException('Course not found');
+      fromCourse = course.id;
+    }
+    const ids = [fromSection, fromSession, fromCourse].filter(Boolean);
+    if (new Set(ids).size > 1) {
       throw new BadRequestException(
-        'Section and session belong to different courses',
+        'section, session and course must belong to the same course',
       );
     }
-    return (fromSection ?? fromSession)!;
+    return (fromCourse ?? fromSection ?? fromSession)!;
   }
 
   private async courseIdOf(quiz: {

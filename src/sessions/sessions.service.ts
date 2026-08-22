@@ -17,6 +17,7 @@ import { resolveJoinWindow } from './session-schedule';
 const COURSE_SCHEDULE_SELECT = {
   id: true,
   instructorId: true,
+  organizationId: true,
   startDate: true,
   durationWeeks: true,
   meetingDays: true,
@@ -160,6 +161,10 @@ export class SessionsService {
 
     const isOwner =
       user.role === Role.INSTRUCTOR && course.instructorId === user.sub;
+    // Admins may resolve any of their org's live sessions to shadow-join them.
+    const isAdmin =
+      user.role === Role.ORG_ADMIN &&
+      course.organizationId === user.organizationId;
     if (user.role === Role.INSTRUCTOR && !isOwner) {
       throw new ForbiddenException('Not your course');
     }
@@ -169,7 +174,7 @@ export class SessionsService {
         select: { id: true },
       });
       if (!enrollment) throw new ForbiddenException('Not enrolled');
-    } else if (!isOwner) {
+    } else if (!isOwner && !isAdmin) {
       throw new ForbiddenException('Not a participant of this session');
     }
 
@@ -240,16 +245,27 @@ export class SessionsService {
   async joinToken(user: JwtPayload, id: string) {
     const session = await this.prisma.liveSession.findUnique({
       where: { id },
-      include: { course: { select: { id: true, instructorId: true } } },
+      include: {
+        course: {
+          select: { id: true, instructorId: true, organizationId: true },
+        },
+      },
     });
     if (!session) throw new NotFoundException('Session not found');
     if (session.status === SessionStatus.ENDED) {
       throw new ConflictException('Session has ended');
     }
 
+    // Admins shadow-join: they observe without appearing to anyone. Everyone
+    // else must own or be enrolled in the session, and students are attended.
+    const shadow = user.role === Role.ORG_ADMIN;
     if (user.role === Role.INSTRUCTOR) {
       if (session.course.instructorId !== user.sub) {
         throw new ForbiddenException('Not your session');
+      }
+    } else if (shadow) {
+      if (session.course.organizationId !== user.organizationId) {
+        throw new ForbiddenException('Not your organization');
       }
     } else {
       const enrollment = await this.prisma.enrollment.findUnique({
@@ -278,8 +294,72 @@ export class SessionsService {
       userId: user.sub,
       name: user.name,
       role: user.role,
+      hidden: shadow,
     });
     return { token, url: this.livekit.url, room: session.livekitRoom };
+  }
+
+  /**
+   * Attendance sheet for a course: the full session list (for the filter
+   * dropdown, newest first) plus, for the selected session — or the most
+   * recent one when none is given — every enrolled student marked present or
+   * absent from the Attendance log. Instructor-owner or org-admin only.
+   */
+  async attendanceForCourse(
+    user: JwtPayload,
+    courseId: string,
+    sessionId?: string,
+  ) {
+    await this.courses.assertCanManageCourse(user, courseId);
+
+    const sessions = await this.prisma.liveSession.findMany({
+      where: { courseId },
+      orderBy: { scheduledAt: 'desc' },
+      select: {
+        id: true,
+        scheduledAt: true,
+        status: true,
+        section: { select: { title: true } },
+      },
+    });
+    const sessionList = sessions.map((s) => ({
+      id: s.id,
+      scheduledAt: s.scheduledAt,
+      status: s.status,
+      sectionTitle: s.section?.title ?? null,
+    }));
+
+    // Default to the most recent session; a supplied id must belong to this course.
+    const selected = sessionId
+      ? sessions.find((s) => s.id === sessionId)
+      : sessions[0];
+    if (!selected) {
+      return { sessions: sessionList, sessionId: null, rows: [] };
+    }
+
+    const [enrollments, attendances] = await Promise.all([
+      this.prisma.enrollment.findMany({
+        where: { courseId },
+        select: { student: { select: { id: true, name: true } } },
+        orderBy: { student: { name: 'asc' } },
+      }),
+      this.prisma.attendance.findMany({
+        where: { sessionId: selected.id },
+        select: { studentId: true, joinedAt: true },
+      }),
+    ]);
+
+    const joinedById = new Map(
+      attendances.map((a) => [a.studentId, a.joinedAt]),
+    );
+    const rows = enrollments.map((e) => ({
+      studentId: e.student.id,
+      name: e.student.name,
+      present: joinedById.has(e.student.id),
+      joinedAt: joinedById.get(e.student.id) ?? null,
+    }));
+
+    return { sessions: sessionList, sessionId: selected.id, rows };
   }
 
   private async getOwned(instructorId: string, id: string) {

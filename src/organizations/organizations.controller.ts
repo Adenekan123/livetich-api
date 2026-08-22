@@ -88,8 +88,11 @@ export class OrganizationsController {
 
   @Get('invites')
   @Roles(Role.ORG_ADMIN)
-  listInvites(@CurrentUser() user: JwtPayload) {
-    return this.orgs.listInvites(orgOf(user));
+  listInvites(
+    @CurrentUser() user: JwtPayload,
+    @Query('courseId') courseId?: string,
+  ) {
+    return this.orgs.listInvites(orgOf(user), courseId);
   }
 
   @Delete('invites/:id')

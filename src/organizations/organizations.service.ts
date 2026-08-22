@@ -47,15 +47,24 @@ export class OrganizationsService {
     });
   }
 
-  createInvite(orgId: string, userId: string, dto: CreateInviteDto) {
+  async createInvite(orgId: string, userId: string, dto: CreateInviteDto) {
     if (dto.role !== Role.STUDENT && dto.role !== Role.INSTRUCTOR) {
       throw new BadRequestException('Invite role must be STUDENT or INSTRUCTOR');
+    }
+    // A course-scoped link must point at a program this org actually owns.
+    if (dto.courseId) {
+      const course = await this.prisma.course.findFirst({
+        where: { id: dto.courseId, organizationId: orgId },
+        select: { id: true },
+      });
+      if (!course) throw new NotFoundException('Program not found');
     }
     return this.prisma.invite.create({
       data: {
         organizationId: orgId,
         createdById: userId,
         role: dto.role,
+        courseId: dto.courseId,
         label: dto.label,
         maxUses: dto.maxUses,
         expiresAt: dto.expiresAt ? new Date(dto.expiresAt) : null,
@@ -64,9 +73,14 @@ export class OrganizationsService {
     });
   }
 
-  async listInvites(orgId: string) {
+  async listInvites(orgId: string, courseId?: string) {
     const invites = await this.prisma.invite.findMany({
-      where: { organizationId: orgId, revokedAt: null },
+      where: {
+        organizationId: orgId,
+        revokedAt: null,
+        // `null` narrows to workspace-level links; a value scopes to one program.
+        ...(courseId !== undefined && { courseId: courseId || null }),
+      },
       orderBy: { createdAt: 'desc' },
     });
     return invites.map((i) => ({ ...i, status: this.statusOf(i) }));
@@ -88,13 +102,17 @@ export class OrganizationsService {
   async resolveInvite(token: string) {
     const invite = await this.prisma.invite.findUnique({
       where: { token },
-      include: { organization: { select: BRAND_SELECT } },
+      include: {
+        organization: { select: BRAND_SELECT },
+        course: { select: { id: true, title: true } },
+      },
     });
     if (!invite || this.statusOf(invite) !== 'ACTIVE') return { valid: false };
     return {
       valid: true,
       role: invite.role,
       organization: invite.organization,
+      course: invite.course,
     };
   }
 

@@ -21,6 +21,8 @@ export class LivekitService {
     userId: string;
     name: string;
     role: Role;
+    /** Shadow observer (admin): invisible to others, can't publish. */
+    hidden?: boolean;
   }): Promise<string> {
     const key = this.config.get<string>('LIVEKIT_API_KEY');
     const secret = this.config.get<string>('LIVEKIT_API_SECRET');
@@ -36,9 +38,12 @@ export class LivekitService {
     at.addGrant({
       roomJoin: true,
       room: opts.room,
-      canPublish: true,
+      // A hidden participant can watch/listen but never appears in anyone
+      // else's participant list and publishes nothing — the shadow-join case.
+      canPublish: !opts.hidden,
       canSubscribe: true,
-      canPublishData: true,
+      canPublishData: !opts.hidden,
+      hidden: opts.hidden ?? false,
     });
     return at.toJwt();
   }

@@ -116,6 +116,20 @@ export class AuthService {
         where: { id: invite!.id },
         data: { uses: { increment: 1 } },
       });
+      // Course-scoped link: land the new user straight in that program. A
+      // student is enrolled; an instructor is assigned to teach it.
+      if (invite!.courseId) {
+        if (invite!.role === Role.STUDENT) {
+          await tx.enrollment.create({
+            data: { courseId: invite!.courseId, studentId: created.id },
+          });
+        } else if (invite!.role === Role.INSTRUCTOR) {
+          await tx.course.update({
+            where: { id: invite!.courseId },
+            data: { instructorId: created.id },
+          });
+        }
+      }
       return created;
     });
 

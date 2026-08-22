@@ -20,6 +20,11 @@ export class CreateInviteDto {
   @MaxLength(80)
   label?: string;
 
+  /** When set, scopes the link to one program (auto-enroll / auto-assign). */
+  @IsOptional()
+  @IsString()
+  courseId?: string;
+
   @IsOptional()
   @IsInt()
   @Min(1)

@@ -4,10 +4,14 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, Role, RemediationStatus } from '@prisma/client';
+import { PointsReason, Prisma, Role, RemediationStatus } from '@prisma/client';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { CoursesService } from '../courses/courses.service';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  PointsService,
+  POINTS_QUIZ_CORRECT,
+} from '../points/points.service';
 import { CreateQuestionDto } from './dto/create-question.dto';
 import { UpdateQuestionDto } from './dto/update-question.dto';
 import { CreateTaskDto } from './dto/create-task.dto';
@@ -22,6 +26,7 @@ export class AssessmentService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly courses: CoursesService,
+    private readonly points: PointsService,
   ) {}
 
   // ======================= Authoring: question bank =======================
@@ -396,6 +401,21 @@ export class AssessmentService {
         await tx.assessmentResponse.createMany({
           data: responses.map((r) => ({ ...r, attemptId: created.id })),
         });
+      }
+      // Award points for correct answers, in the same transaction so the grade
+      // and the ledger land together. Assessments submit once (resubmission is
+      // blocked above), so this never double-awards.
+      if (score > 0) {
+        await this.points.award(
+          {
+            studentId: user.sub,
+            courseId: assessment.courseId,
+            delta: score * POINTS_QUIZ_CORRECT,
+            reason: PointsReason.QUIZ_CORRECT,
+            refId: created.id,
+          },
+          tx,
+        );
       }
       return created;
     });

@@ -10,6 +10,16 @@ export type SessionStatus = 'SCHEDULED' | 'LIVE' | 'ENDED';
 /** Which surface the class is looking at. The instructor drives it for everyone. */
 export type StageView = 'video' | 'board' | 'quran' | 'code';
 
+/** The room's colour scheme. Instructor-driven and shared by everyone in the
+ *  session. 'teal' is the classic default; the rest re-tint the room chrome. */
+export type RoomScheme = 'teal' | 'forest' | 'indigo' | 'plum';
+export const ROOM_SCHEMES: readonly RoomScheme[] = [
+  'teal',
+  'forest',
+  'indigo',
+  'plum',
+];
+
 /** The verse the shared mushaf is turned to (instructor-driven). */
 export interface QuranPosition {
   /** 1-based surah number (1–114). */
@@ -45,6 +55,8 @@ export interface ChatMessage {
   sessionId: string;
   user: RoomUser;
   body: string;
+  /** Same-origin URL of an attached voice note; null/absent for text. */
+  audioUrl?: string | null;
   sentAt: string; // ISO, server clock
 }
 
@@ -60,6 +72,8 @@ export interface QuizQuestionPublic {
   body: string;
   options: string[];
   timeLimitSec: number;
+  /** Points the first correct answerer earns (instructor-set per question). */
+  points: number;
   /** Server time the question opened; clients render a countdown against this. */
   openedAt: string;
 }
@@ -78,6 +92,8 @@ export interface ClientToServerEvents {
   'room:leave': (p: { sessionId: string }) => void;
 
   'chat:send': (p: { sessionId: string; body: string }) => void;
+  /** Post a recorded voice note; audioUrl comes from the prior REST upload. */
+  'chat:voice': (p: { sessionId: string; audioUrl: string }) => void;
 
   'hand:raise': (p: { sessionId: string }) => void;
   'hand:lower': (p: { sessionId: string }) => void;
@@ -95,8 +111,14 @@ export interface ClientToServerEvents {
   'student:pick-random': (p: { sessionId: string }) => void;
   'screen-share:grant': (p: { sessionId: string; userId: string }) => void;
   'screen-share:revoke': (p: { sessionId: string; userId: string }) => void;
+  /** Instructor grants / revokes a specific student the mic. Students are muted
+   *  by default and cannot unmute until granted (or picked to speak). */
+  'mic:grant': (p: { sessionId: string; userId: string }) => void;
+  'mic:revoke': (p: { sessionId: string; userId: string }) => void;
   /** Instructor switches the class between video, chalkboard, and mushaf. */
   'view:change': (p: { sessionId: string; view: StageView }) => void;
+  /** Instructor sets the room's shared colour scheme for everyone. */
+  'theme:change': (p: { sessionId: string; scheme: RoomScheme }) => void;
   /** Instructor turns the shared mushaf to a surah/ayah for everyone. */
   'quran:navigate': (p: {
     sessionId: string;
@@ -117,6 +139,8 @@ export interface ServerToClientEvents {
 
   /** The active surface, driven by the instructor; students follow. */
   'view:changed': (p: { sessionId: string; view: StageView }) => void;
+  /** The room's current colour scheme; sent on join and on every change. */
+  'theme:changed': (p: { sessionId: string; scheme: RoomScheme }) => void;
 
   /** Where the shared mushaf is turned; students follow the instructor. */
   'quran:position': (p: {
@@ -158,6 +182,10 @@ export interface ServerToClientEvents {
 
   'screen-share:granted': (p: { sessionId: string; userId: string }) => void;
   'screen-share:revoked': (p: { sessionId: string; userId: string }) => void;
+
+  /** The set of students currently allowed to speak (mic granted by the
+   *  instructor). Everyone else is mic-muted and cannot unmute. */
+  'mic:speakers': (p: { sessionId: string; userIds: string[] }) => void;
 
   error: (p: { code: string; message: string }) => void;
 }
