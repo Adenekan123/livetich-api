@@ -17,6 +17,9 @@ services:
     environment:
       APP_DOMAIN: ${APP_DOMAIN}
       API_DOMAIN: ${API_DOMAIN}
+      # Caddyfile references {$ACME_EMAIL}; without it the config fails to parse
+      # ("wrong argument count after 'email'") and Caddy crash-loops.
+      ACME_EMAIL: ${ACME_EMAIL}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
