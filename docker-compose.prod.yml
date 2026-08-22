@@ -36,6 +36,12 @@ services:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
     restart: unless-stopped
     env_file: deploy/.env.prod
+    environment:
+      # Server-side rendering / server actions run inside this container and call
+      # the API over the internal network. Reaching the public NEXT_PUBLIC_API_URL
+      # from in here hairpins out to the host and back through Caddy, which hangs;
+      # the browser still uses the public URL baked at build time.
+      API_INTERNAL_URL: http://api:3000
     expose:
       - "3000"
     healthcheck:
