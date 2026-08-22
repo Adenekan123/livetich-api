@@ -74,6 +74,11 @@ services:
   mysql:
     image: mysql:8.4
     restart: unless-stopped
+    # Case-insensitive table names, matching dev MySQL (Win/Mac). Without this,
+    # Linux MySQL is case-sensitive and migrations that reference tables in
+    # lowercase (ALTER TABLE course/quiz/…) fail to find Prisma's PascalCase
+    # tables. Only applies on a fresh data dir — wipe the volume to re-init.
+    command: ["--lower-case-table-names=1"]
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE}
