@@ -80,11 +80,22 @@ services:
   mysql:
     image: mysql:8.4
     restart: unless-stopped
-    # Case-insensitive table names, matching dev MySQL (Win/Mac). Without this,
-    # Linux MySQL is case-sensitive and migrations that reference tables in
-    # lowercase (ALTER TABLE course/quiz/…) fail to find Prisma's PascalCase
-    # tables. Only applies on a fresh data dir — wipe the volume to re-init.
-    command: ["--lower-case-table-names=1"]
+    # --lower-case-table-names=1: case-insensitive table names, matching dev
+    # MySQL (Win/Mac). Without it, Linux MySQL is case-sensitive and migrations
+    # referencing tables in lowercase (ALTER TABLE course/quiz/…) fail to find
+    # Prisma's PascalCase tables. Only applies on a fresh data dir — must stay 1
+    # to match the initialised volume, or mysqld refuses to start.
+    #
+    # The rest trims memory so mysqld fits on the 1 GB box alongside web/api/
+    # redis/caddy — performance_schema OFF is the big saver (~hundreds of MB);
+    # the smaller buffer pool + capped connections keep startup within budget so
+    # it can't OOM-crash-loop during InnoDB init (see deploy notes).
+    command:
+      - "--lower-case-table-names=1"
+      - "--performance-schema=OFF"
+      - "--innodb-buffer-pool-size=64M"
+      - "--innodb-log-buffer-size=8M"
+      - "--max-connections=60"
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE}
