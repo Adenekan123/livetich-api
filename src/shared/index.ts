@@ -88,7 +88,7 @@ export interface BuzzerState {
 // ---------- Socket events ----------
 
 export interface ClientToServerEvents {
-  'room:join': (p: { sessionId: string }) => void;
+  'room:join': (p: { sessionId: string; as?: 'teach' }) => void;
   'room:leave': (p: { sessionId: string }) => void;
 
   'chat:send': (p: { sessionId: string; body: string }) => void;

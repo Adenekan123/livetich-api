@@ -41,6 +41,9 @@ interface SocketData {
   /** Resolves once the account gate has run: true = permitted, false = rejected.
    *  room:join awaits this so a message racing the async check can't slip past. */
   authReady: Promise<boolean>;
+  /** An org admin who joined in teach-mode (solo teacher): treated as the
+   *  session's host for the life of this socket rather than a shadow observer. */
+  teaching?: boolean;
 }
 
 type RoomServer = Server<
@@ -155,7 +158,7 @@ export class RoomGateway
   @SubscribeMessage('room:join')
   async onJoin(
     @ConnectedSocket() client: RoomSocket,
-    @MessageBody() p: { sessionId: string },
+    @MessageBody() p: { sessionId: string; as?: 'teach' },
   ) {
     // Wait out the account gate before doing anything — otherwise a rejected
     // (disabled/unverified) socket could add presence in the brief window before
@@ -174,13 +177,18 @@ export class RoomGateway
       return this.fail(client, 'NOT_JOINABLE', 'Session not found or ended');
     }
 
-    // Admins shadow-observe silently; everyone else must own or be enrolled.
-    const shadow = user.role === Role.ORG_ADMIN;
+    // Admins shadow-observe silently — unless they entered in teach-mode, where
+    // a solo-teacher admin joins visibly as the session host. Everyone else must
+    // own or be enrolled.
+    const isAdmin = user.role === Role.ORG_ADMIN;
+    const teaching = isAdmin && p.as === 'teach';
+    const shadow = isAdmin && !teaching;
+    client.data.teaching = teaching;
     if (user.role === Role.INSTRUCTOR) {
       if (session.course.instructorId !== user.sub) {
         return this.fail(client, 'FORBIDDEN', 'Not your session');
       }
-    } else if (shadow) {
+    } else if (isAdmin) {
       if (session.course.organizationId !== user.organizationId) {
         return this.fail(client, 'FORBIDDEN', 'Not your organization');
       }
@@ -215,7 +223,7 @@ export class RoomGateway
         users: await this.state.listPresence(p.sessionId),
       });
     } else {
-      await this.state.addPresence(p.sessionId, this.roomUser(user));
+      await this.state.addPresence(p.sessionId, this.roomUser(client));
       await this.broadcastPresence(p.sessionId);
     }
     // Late joiners still need current room state:
@@ -316,7 +324,7 @@ export class RoomGateway
     if (!body || body.length > 2000) return;
 
     if (
-      user.role !== Role.INSTRUCTOR &&
+      this.actingRole(client) !== Role.INSTRUCTOR &&
       (await this.state.isChatLocked(p.sessionId))
     ) {
       return this.fail(client, 'CHAT_LOCKED', 'Chat is locked');
@@ -328,7 +336,7 @@ export class RoomGateway
     this.server.to(p.sessionId).emit('chat:message', {
       id: saved.id,
       sessionId: p.sessionId,
-      user: this.roomUser(user),
+      user: this.roomUser(client),
       body,
       sentAt: saved.createdAt.toISOString(),
     });
@@ -347,7 +355,7 @@ export class RoomGateway
     if (!audioUrl || !/^\/api\/files\/voice\/[\w-]+$/.test(audioUrl)) return;
 
     if (
-      user.role !== Role.INSTRUCTOR &&
+      this.actingRole(client) !== Role.INSTRUCTOR &&
       (await this.state.isChatLocked(p.sessionId))
     ) {
       return this.fail(client, 'CHAT_LOCKED', 'Chat is locked');
@@ -359,7 +367,7 @@ export class RoomGateway
     this.server.to(p.sessionId).emit('chat:message', {
       id: saved.id,
       sessionId: p.sessionId,
-      user: this.roomUser(user),
+      user: this.roomUser(client),
       body: '',
       audioUrl,
       sentAt: saved.createdAt.toISOString(),
@@ -459,7 +467,7 @@ export class RoomGateway
   ) {
     const user = client.data.user;
     if (!this.inRoom(client, p.sessionId) || user.role !== Role.STUDENT) return;
-    await this.state.raiseHand(p.sessionId, this.roomUser(user));
+    await this.state.raiseHand(p.sessionId, this.roomUser(client));
     await this.broadcastHands(p.sessionId);
   }
 
@@ -662,7 +670,7 @@ export class RoomGateway
       phase: 'WINNER',
       eligibleUserIds: latest.eligibleUserIds,
       question: latest.question,
-      winner: this.roomUser(user),
+      winner: this.roomUser(client),
     };
     await this.state.setBuzzerState(p.sessionId, winnerState);
 
@@ -826,7 +834,11 @@ export class RoomGateway
 
   private async ownedSession(client: RoomSocket, sessionId: string) {
     const user = client.data.user;
-    if (user.role !== Role.INSTRUCTOR) {
+    const isInstructor = user.role === Role.INSTRUCTOR;
+    // A teach-mode admin hosts any live session in their own org.
+    const isTeachingAdmin =
+      user.role === Role.ORG_ADMIN && client.data.teaching === true;
+    if (!isInstructor && !isTeachingAdmin) {
       this.fail(client, 'FORBIDDEN', 'Instructor only');
       return null;
     }
@@ -836,15 +848,28 @@ export class RoomGateway
         course: { select: { instructorId: true, organizationId: true } },
       },
     });
-    if (!session || session.course.instructorId !== user.sub) {
+    const owns = isInstructor
+      ? session?.course.instructorId === user.sub
+      : session?.course.organizationId === user.organizationId;
+    if (!session || !owns) {
       this.fail(client, 'FORBIDDEN', 'Not your session');
       return null;
     }
     return session;
   }
 
-  private roomUser(user: JwtPayload): RoomUser {
-    return { userId: user.sub, name: user.name, role: user.role };
+  /** The role this socket acts as: a teach-mode admin behaves as INSTRUCTOR
+   *  (host powers, visible presence); everyone else is their own account role. */
+  private actingRole(client: RoomSocket): Role {
+    const user = client.data.user;
+    return client.data.teaching ? Role.INSTRUCTOR : user.role;
+  }
+
+  /** Presence/author identity for this socket, using its acting role so a
+   *  teach-mode admin appears to the room as the instructor. */
+  private roomUser(client: RoomSocket): RoomUser {
+    const user = client.data.user;
+    return { userId: user.sub, name: user.name, role: this.actingRole(client) };
   }
 
   private fail(client: RoomSocket, code: string, message: string) {

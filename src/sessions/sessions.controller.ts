@@ -40,13 +40,15 @@ export class SessionsController {
     return this.sessions.courseSessionStatus(courseId);
   }
 
-  /** Enter today's live session for a course — materialises it on first join. */
+  /** Enter today's live session for a course — materialises it on first join.
+   *  `as=teach` lets an org admin enter as the instructor (solo-teacher mode). */
   @Post('course/:courseId/join')
   joinCourse(
     @CurrentUser() user: JwtPayload,
     @Param('courseId') courseId: string,
+    @Query('as') as?: string,
   ) {
-    return this.sessions.resolveCourseSession(user, courseId);
+    return this.sessions.resolveCourseSession(user, courseId, as === 'teach');
   }
 
   /** Attendance sheet for a course — instructor-owner or org-admin only.
@@ -74,14 +76,19 @@ export class SessionsController {
   }
 
   @Post(':id/end')
-  @Roles(Role.INSTRUCTOR)
+  @Roles(Role.INSTRUCTOR, Role.ORG_ADMIN)
   end(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
-    return this.sessions.end(user.sub, id);
+    return this.sessions.end(user, id);
   }
 
-  /** Mint a LiveKit join token for the current user. */
+  /** Mint a LiveKit join token for the current user.
+   *  `as=teach` mints a visible instructor token for a solo-teacher admin. */
   @Post(':id/token')
-  token(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
-    return this.sessions.joinToken(user, id);
+  token(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Query('as') as?: string,
+  ) {
+    return this.sessions.joinToken(user, id, as === 'teach');
   }
 }

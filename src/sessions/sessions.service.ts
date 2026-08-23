@@ -121,8 +121,8 @@ export class SessionsService {
     });
   }
 
-  async end(instructorId: string, id: string) {
-    const session = await this.getOwned(instructorId, id);
+  async end(user: JwtPayload, id: string) {
+    const session = await this.getManageable(user, id);
     if (session.status !== SessionStatus.LIVE) {
       throw new ConflictException(`Cannot end a ${session.status} session`);
     }
@@ -147,7 +147,7 @@ export class SessionsService {
    * materialised on first entry. The instructor arriving flips it LIVE; students
    * may enter beforehand and see the "instructor will join soon" board.
    */
-  async resolveCourseSession(user: JwtPayload, courseId: string) {
+  async resolveCourseSession(user: JwtPayload, courseId: string, teach = false) {
     const course = await this.prisma.course.findUnique({
       where: { id: courseId },
       select: COURSE_SCHEDULE_SELECT,
@@ -165,6 +165,9 @@ export class SessionsService {
     const isAdmin =
       user.role === Role.ORG_ADMIN &&
       course.organizationId === user.organizationId;
+    // A solo-teacher admin can enter as the instructor (teach-mode) — arriving
+    // this way makes the room go live, exactly like the assigned instructor.
+    const goingLiveAsHost = isOwner || (isAdmin && teach);
     if (user.role === Role.INSTRUCTOR && !isOwner) {
       throw new ForbiddenException('Not your course');
     }
@@ -202,8 +205,9 @@ export class SessionsService {
       });
       status = SessionStatus.SCHEDULED;
     }
-    // The instructor arriving is what makes the room live.
-    if (isOwner && status === SessionStatus.SCHEDULED) {
+    // The instructor arriving — or an admin entering in teach-mode — is what
+    // makes the room live.
+    if (goingLiveAsHost && status === SessionStatus.SCHEDULED) {
       await this.prisma.liveSession.update({
         where: { id: session.id },
         data: { status: SessionStatus.LIVE, startedAt: new Date() },
@@ -242,7 +246,7 @@ export class SessionsService {
    * may enter any non-ended session — if the instructor hasn't arrived yet the
    * classroom shows a waiting board until it flips LIVE.
    */
-  async joinToken(user: JwtPayload, id: string) {
+  async joinToken(user: JwtPayload, id: string, teach = false) {
     const session = await this.prisma.liveSession.findUnique({
       where: { id },
       include: {
@@ -256,14 +260,18 @@ export class SessionsService {
       throw new ConflictException('Session has ended');
     }
 
-    // Admins shadow-join: they observe without appearing to anyone. Everyone
-    // else must own or be enrolled in the session, and students are attended.
-    const shadow = user.role === Role.ORG_ADMIN;
+    // Admins normally shadow-join: they observe without appearing to anyone. In
+    // teach-mode a solo-teacher admin instead joins as the instructor — visible,
+    // publishing, and with an INSTRUCTOR token so the room grants host powers.
+    // Everyone else must own or be enrolled, and students are attended.
+    const isAdmin = user.role === Role.ORG_ADMIN;
+    const teaching = isAdmin && teach;
+    const shadow = isAdmin && !teach;
     if (user.role === Role.INSTRUCTOR) {
       if (session.course.instructorId !== user.sub) {
         throw new ForbiddenException('Not your session');
       }
-    } else if (shadow) {
+    } else if (isAdmin) {
       if (session.course.organizationId !== user.organizationId) {
         throw new ForbiddenException('Not your organization');
       }
@@ -293,7 +301,9 @@ export class SessionsService {
       room: session.livekitRoom,
       userId: user.sub,
       name: user.name,
-      role: user.role,
+      // A teaching admin carries an INSTRUCTOR role in the token metadata so the
+      // room treats them as the host, not an admin observer.
+      role: teaching ? Role.INSTRUCTOR : user.role,
       hidden: shadow,
     });
     return { token, url: this.livekit.url, room: session.livekitRoom };
@@ -369,6 +379,28 @@ export class SessionsService {
     });
     if (!session) throw new NotFoundException('Session not found');
     if (session.course.instructorId !== instructorId) {
+      throw new ForbiddenException('Not your session');
+    }
+    return session;
+  }
+
+  /** The session if the caller may run it: the assigned instructor, or an admin
+   *  of the owning org (a solo teacher ending their own teach-mode class). */
+  private async getManageable(user: JwtPayload, id: string) {
+    const session = await this.prisma.liveSession.findUnique({
+      where: { id },
+      include: {
+        course: { select: { instructorId: true, organizationId: true } },
+      },
+    });
+    if (!session) throw new NotFoundException('Session not found');
+    const isOwner =
+      user.role === Role.INSTRUCTOR &&
+      session.course.instructorId === user.sub;
+    const isAdmin =
+      user.role === Role.ORG_ADMIN &&
+      session.course.organizationId === user.organizationId;
+    if (!isOwner && !isAdmin) {
       throw new ForbiddenException('Not your session');
     }
     return session;
