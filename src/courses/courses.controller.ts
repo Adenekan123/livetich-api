@@ -97,7 +97,11 @@ export class CoursesController {
 
   // ---------- Manage (owning admin or assigned instructor) ----------
 
+  /** Editing the program itself (title, schedule, dates, cadence) is admin-only;
+   *  instructors manage teaching surfaces (sections, assessments) but don't
+   *  reconfigure the program. */
   @Patch(':id')
+  @Roles(Role.ORG_ADMIN)
   update(
     @CurrentUser() user: JwtPayload,
     @Param('id') id: string,
