@@ -20,9 +20,9 @@ export class QuizService {
     private readonly points: PointsService,
   ) {}
 
-  async create(instructorId: string, dto: CreateQuizDto) {
+  async create(user: JwtPayload, dto: CreateQuizDto) {
     const courseId = await this.resolveCourseId(dto);
-    await this.courses.assertCourseOwner(instructorId, courseId);
+    await this.courses.assertCanManageCourse(user, courseId);
 
     dto.questions.forEach((q, i) => {
       if (q.correctIndex >= q.options.length) {
@@ -54,14 +54,14 @@ export class QuizService {
     });
   }
 
-  /** Session quizzes for the owning instructor (drives the buzzer UI). */
-  async listForSession(instructorId: string, sessionId: string) {
+  /** Session quizzes for the managing instructor/admin (drives the buzzer UI). */
+  async listForSession(user: JwtPayload, sessionId: string) {
     const session = await this.prisma.liveSession.findUnique({
       where: { id: sessionId },
       select: { courseId: true },
     });
     if (!session) throw new NotFoundException('Session not found');
-    await this.courses.assertCourseOwner(instructorId, session.courseId);
+    await this.courses.assertCanManageCourse(user, session.courseId);
     // The live-room buzzer draws from the course's reusable bank as well as any
     // question tied straight to this session, so a class always has something to
     // run even when nothing was pre-authored for this exact session.
@@ -72,9 +72,9 @@ export class QuizService {
     });
   }
 
-  /** The course's reusable buzzer bank (owner-only) — powers the dashboard manager. */
-  async listForCourse(instructorId: string, courseId: string) {
-    await this.courses.assertCourseOwner(instructorId, courseId);
+  /** The course's reusable buzzer bank — powers the dashboard manager. */
+  async listForCourse(user: JwtPayload, courseId: string) {
+    await this.courses.assertCanManageCourse(user, courseId);
     return this.prisma.quiz.findMany({
       where: { courseId, type: QuizType.BUZZER },
       include: { questions: true },
@@ -83,7 +83,7 @@ export class QuizService {
   }
 
   /** Remove a single buzzer question (and its parent quiz if it was the last one). */
-  async deleteQuestion(instructorId: string, questionId: string) {
+  async deleteQuestion(user: JwtPayload, questionId: string) {
     const question = await this.prisma.quizQuestion.findUnique({
       where: { id: questionId },
       include: {
@@ -102,7 +102,7 @@ export class QuizService {
           )?.courseId
         : undefined);
     if (!courseId) throw new NotFoundException('Question not found');
-    await this.courses.assertCourseOwner(instructorId, courseId);
+    await this.courses.assertCanManageCourse(user, courseId);
 
     await this.prisma.quizQuestion.delete({ where: { id: questionId } });
     const remaining = await this.prisma.quizQuestion.count({
@@ -123,8 +123,10 @@ export class QuizService {
     if (!quiz) throw new NotFoundException('Quiz not found');
 
     const courseId = await this.courseIdOf(quiz);
-    if (user.role === Role.INSTRUCTOR) {
-      await this.courses.assertCourseOwner(user.sub, courseId);
+    // Managers (instructor-owner or owning-org admin) see correctIndex; students
+    // never do.
+    if (user.role !== Role.STUDENT) {
+      await this.courses.assertCanManageCourse(user, courseId);
       return quiz;
     }
 
@@ -191,8 +193,8 @@ export class QuizService {
     };
   }
 
-  /** Per-question stats for the owning instructor. */
-  async results(instructorId: string, quizId: string) {
+  /** Per-question stats for the managing instructor/admin. */
+  async results(user: JwtPayload, quizId: string) {
     const quiz = await this.prisma.quiz.findUnique({
       where: { id: quizId },
       include: {
@@ -207,10 +209,7 @@ export class QuizService {
       },
     });
     if (!quiz) throw new NotFoundException('Quiz not found');
-    await this.courses.assertCourseOwner(
-      instructorId,
-      await this.courseIdOf(quiz),
-    );
+    await this.courses.assertCanManageCourse(user, await this.courseIdOf(quiz));
 
     return quiz.questions.map((q) => ({
       questionId: q.id,

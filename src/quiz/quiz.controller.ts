@@ -20,32 +20,35 @@ import { QuizService } from './quiz.service';
 export class QuizController {
   constructor(private readonly quiz: QuizService) {}
 
+  // Buzzer authoring is a course-management action, so an org admin (including
+  // one teaching a session as instructor) may do it too — the service checks
+  // course ownership via assertCanManageCourse.
   @Post()
-  @Roles(Role.INSTRUCTOR)
+  @Roles(Role.INSTRUCTOR, Role.ORG_ADMIN)
   create(@CurrentUser() user: JwtPayload, @Body() dto: CreateQuizDto) {
-    return this.quiz.create(user.sub, dto);
+    return this.quiz.create(user, dto);
   }
 
   /** Declared before :id so "quizzes?sessionId=…" isn't matched as an id. */
   @Get()
-  @Roles(Role.INSTRUCTOR)
+  @Roles(Role.INSTRUCTOR, Role.ORG_ADMIN)
   list(
     @CurrentUser() user: JwtPayload,
     @Query('sessionId') sessionId?: string,
     @Query('courseId') courseId?: string,
   ) {
-    if (courseId) return this.quiz.listForCourse(user.sub, courseId);
-    if (sessionId) return this.quiz.listForSession(user.sub, sessionId);
+    if (courseId) return this.quiz.listForCourse(user, courseId);
+    if (sessionId) return this.quiz.listForSession(user, sessionId);
     throw new BadRequestException('sessionId or courseId is required');
   }
 
   @Delete('questions/:questionId')
-  @Roles(Role.INSTRUCTOR)
+  @Roles(Role.INSTRUCTOR, Role.ORG_ADMIN)
   deleteQuestion(
     @CurrentUser() user: JwtPayload,
     @Param('questionId') questionId: string,
   ) {
-    return this.quiz.deleteQuestion(user.sub, questionId);
+    return this.quiz.deleteQuestion(user, questionId);
   }
 
   @Get(':id')
@@ -54,9 +57,9 @@ export class QuizController {
   }
 
   @Get(':id/results')
-  @Roles(Role.INSTRUCTOR)
+  @Roles(Role.INSTRUCTOR, Role.ORG_ADMIN)
   results(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
-    return this.quiz.results(user.sub, id);
+    return this.quiz.results(user, id);
   }
 
   @Post('questions/:questionId/answer')
