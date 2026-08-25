@@ -206,7 +206,7 @@ export interface BoardPresenter {
 }
 
 export interface BoardClientToServerEvents {
-  'board:join': (p: { sessionId: string }) => void;
+  'board:join': (p: { sessionId: string; as?: 'teach' }) => void;
   'board:leave': (p: { sessionId: string }) => void;
   /** Instructor-only: incremental Yjs document update. */
   'board:update': (p: { sessionId: string; update: BoardBinary }) => void;

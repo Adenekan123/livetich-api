@@ -24,6 +24,9 @@ import { BoardDocService } from './board-doc.service';
 interface SocketData {
   user: JwtPayload;
   sessionIds: Set<string>;
+  /** An org admin who joined in teach-mode (solo teacher): treated as the
+   *  presenter (writer) rather than a read-only observer. Mirrors RoomGateway. */
+  teaching?: boolean;
   /** Resolves once the account gate has run (see RoomGateway). board:join awaits
    *  this so a message racing the async check can't slip past. */
   authReady: Promise<boolean>;
@@ -109,7 +112,7 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @SubscribeMessage('board:join')
   async onJoin(
     @ConnectedSocket() client: BoardSocket,
-    @MessageBody() p: { sessionId: string },
+    @MessageBody() p: { sessionId: string; as?: 'teach' },
   ) {
     if (!(await client.data.authReady)) return;
     const user = client.data.user;
@@ -117,13 +120,26 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     const session = await this.prisma.liveSession.findUnique({
       where: { id: p.sessionId },
-      include: { course: { select: { id: true, instructorId: true } } },
+      include: {
+        course: {
+          select: { id: true, instructorId: true, organizationId: true },
+        },
+      },
     });
     if (!session || session.status === SessionStatus.ENDED) {
       return this.fail(client, 'NOT_JOINABLE', 'Session not found or ended');
     }
+    // A teach-mode admin presents like the instructor; a plain admin observes
+    // read-only. Everyone else is an instructor-owner or an enrolled student.
+    const isAdmin = user.role === Role.ORG_ADMIN;
+    const teaching = isAdmin && p.as === 'teach';
+    client.data.teaching = teaching;
     if (user.role === Role.INSTRUCTOR) {
       if (session.course.instructorId !== user.sub) {
+        return this.fail(client, 'FORBIDDEN', 'Not your session');
+      }
+    } else if (isAdmin) {
+      if (session.course.organizationId !== user.organizationId) {
         return this.fail(client, 'FORBIDDEN', 'Not your session');
       }
     } else {
@@ -167,7 +183,7 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() p: { sessionId: string; open: boolean },
   ) {
     if (!this.inRoom(client, p.sessionId)) return;
-    if (client.data.user.role !== Role.INSTRUCTOR) return;
+    if (!this.canPresent(client)) return;
     if (p.open) this.writable.add(p.sessionId);
     else this.writable.delete(p.sessionId);
     this.server
@@ -191,11 +207,9 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() p: { sessionId: string; update: BoardBinary },
   ) {
     if (!this.inRoom(client, p.sessionId)) return;
-    // Instructor always writes; students only while the board is opened.
-    if (
-      client.data.user.role !== Role.INSTRUCTOR &&
-      !this.writable.has(p.sessionId)
-    ) {
+    // Presenter (instructor / teach-mode admin) always writes; students only
+    // while the board is opened.
+    if (!this.canPresent(client) && !this.writable.has(p.sessionId)) {
       return this.fail(client, 'FORBIDDEN', 'The board is read-only');
     }
     const update = this.toBytes(p.update);
@@ -222,7 +236,7 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
     },
   ) {
     if (!this.inRoom(client, p.sessionId)) return;
-    if (client.data.user.role !== Role.INSTRUCTOR) return;
+    if (!this.canPresent(client)) return;
     client.to(p.sessionId).emit('board:presenter', {
       sessionId: p.sessionId,
       camera: p.camera,
@@ -255,6 +269,16 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (client.data.sessionIds?.has(sessionId)) return true;
     this.fail(client, 'NOT_IN_ROOM', 'Join the board first');
     return false;
+  }
+
+  /** Whether this socket may drive the board (write shapes, open it for students,
+   *  broadcast the presenter view): the owning instructor or a teach-mode admin.
+   *  A plain (shadow) admin and un-invited students stay read-only. */
+  private canPresent(client: BoardSocket): boolean {
+    return (
+      client.data.user.role === Role.INSTRUCTOR ||
+      client.data.teaching === true
+    );
   }
 
   private fail(client: BoardSocket, code: string, message: string) {
