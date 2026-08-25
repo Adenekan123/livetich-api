@@ -88,8 +88,18 @@ export class AuthService {
         passwordHash: await bcryptHash(newPassword, BCRYPT_ROUNDS),
         resetTokenHash: null,
         resetTokenExpiresAt: null,
+        // Resetting via the emailed link proves the user controls this address,
+        // so mark the account verified. Without this an unverified user is
+        // bounced to the verification page right after resetting — with no code
+        // sent — and can't get in. Clear any pending OTP while we're here.
+        emailVerified: true,
+        verifyOtpHash: null,
+        verifyOtpExpiresAt: null,
       },
     });
+    // Drop any cached (status, emailVerified) so the guard sees the change on
+    // the very next request rather than after the cache TTL.
+    await this.authCache.invalidate(user.id);
   }
 
   /** Student/instructor signup, gated by an org invite link. */
