@@ -20,6 +20,7 @@ import { GroupsModule } from './groups/groups.module';
 import { HifzModule } from './hifz/hifz.module';
 import { PluginsModule } from './plugins/plugins.module';
 import { AssignmentsModule } from './assignments/assignments.module';
+import { CodingModule } from './coding/coding.module';
 import { AssessmentModule } from './assessment/assessment.module';
 import { ExamsModule } from './exams/exams.module';
 import { SessionsModule } from './sessions/sessions.module';
@@ -66,6 +67,7 @@ import { RealtimeModule } from './realtime/realtime.module';
     GroupsModule,
     HifzModule,
     AssignmentsModule,
+    CodingModule,
     AssessmentModule,
     ExamsModule,
     SessionsModule,
