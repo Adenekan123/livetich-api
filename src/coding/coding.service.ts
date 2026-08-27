@@ -220,6 +220,40 @@ export class CodingService {
     }));
   }
 
+  /** The manager's coding assignments across every course they manage (an
+   *  instructor's own courses, or an org admin's whole org). Powers the VS Code
+   *  plugin's "Teaching" list. */
+  async teaching(user: JwtPayload) {
+    const where: Prisma.CodingAssignmentWhereInput =
+      user.role === Role.ORG_ADMIN
+        ? user.organizationId
+          ? { course: { organizationId: user.organizationId } }
+          : { id: '__none__' } // admin with no org sees nothing
+        : { course: { instructorId: user.sub } };
+
+    const assignments = await this.prisma.codingAssignment.findMany({
+      where,
+      orderBy: [{ createdAt: 'desc' }],
+      include: {
+        course: { select: { title: true } },
+        session: { select: { id: true, status: true } },
+        _count: { select: { submissions: true } },
+      },
+    });
+    return assignments.map((a) => ({
+      id: a.id,
+      title: a.title,
+      courseId: a.courseId,
+      courseTitle: a.course.title,
+      language: a.language,
+      framework: a.framework,
+      status: a.status,
+      dueAt: a.dueAt,
+      sessionLive: a.session?.status === 'LIVE',
+      submissionCount: a._count.submissions,
+    }));
+  }
+
   /** Launch a task live ("Practice now") — moves it to LIVE and (optionally)
    *  binds it to the session it was launched from. */
   async launch(user: JwtPayload, id: string, sessionId?: string) {

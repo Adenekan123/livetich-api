@@ -52,6 +52,12 @@ export class CodingController {
     return this.coding.mine(user);
   }
 
+  /** The manager's coding assignments across their courses (Teaching list). */
+  @Get('teaching')
+  teaching(@CurrentUser() user: JwtPayload) {
+    return this.coding.teaching(user);
+  }
+
   // ---- Authoring (manager = assigned instructor or org admin) ----
 
   @Post('courses/:courseId/assignments')
