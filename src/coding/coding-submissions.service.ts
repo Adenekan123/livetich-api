@@ -12,6 +12,7 @@ import { CoursesService } from '../courses/courses.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { OBJECT_STORAGE } from '../storage/object-storage';
 import type { ObjectStorage } from '../storage/object-storage';
+import { CodingLiveService } from './coding-live.service';
 import {
   indexArchive,
   MAX_ARCHIVE_BYTES,
@@ -50,6 +51,7 @@ export class CodingSubmissionsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly courses: CoursesService,
+    private readonly live: CodingLiveService,
     @Inject(OBJECT_STORAGE) private readonly storage: ObjectStorage,
   ) {}
 
@@ -125,6 +127,10 @@ export class CodingSubmissionsService {
       data: { archiveUrl: `/api/coding/files/archive/${submission.id}` },
       include: { files: { orderBy: { path: 'asc' } } },
     });
+
+    // Move the student from "coding" to "submitted" on the live board, and
+    // surface the new attempt on the instructor's in-room review card.
+    await this.live.broadcastSubmissionUpdate(withUrl.id);
 
     return { submission: withUrl, sessionId: assignment.sessionId };
   }

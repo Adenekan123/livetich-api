@@ -735,6 +735,13 @@ enum CodingAssignmentStatus {
   CLOSED
 }
 
+/// Whether a coding task runs in a live session (LIVE) or is set against the
+/// next class as homework (ASSIGNMENT). Drives launch + broadcast behaviour.
+enum CodingAssignmentKind {
+  LIVE
+  ASSIGNMENT
+}
+
 /// A submission's place in the review pipeline (no test/sandbox stages).
 enum CodingSubmissionStatus {
   SUBMITTED // received, awaiting review
@@ -780,6 +787,8 @@ model CodingAssignment {
   /// Optional live session this task was launched in ("Practice now").
   sessionId        String?
   createdById      String
+  /// Live task (runs in a session) vs assignment (homework for the next class).
+  kind             CodingAssignmentKind   @default(ASSIGNMENT)
   title            String
   description      String?                @db.Text
   language         String? // e.g. "typescript"

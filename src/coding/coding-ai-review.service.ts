@@ -1,6 +1,5 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import Anthropic from '@anthropic-ai/sdk';
-import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
+import { GoogleGenAI, Type } from '@google/genai';
 import { z } from 'zod';
 import {
   AiConfidence,
@@ -13,12 +12,17 @@ import type { JwtPayload } from '../auth/jwt-payload';
 import { CoursesService } from '../courses/courses.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CodingSubmissionsService } from './coding-submissions.service';
+import { CodingLiveService } from './coding-live.service';
 
 /** Bumped when the prompt/schema changes, so a review records how it was made. */
-const PROMPT_VERSION = 'coding-review-v1';
-const PROVIDER = 'anthropic';
-/** Overridable so the pilot can trade quality for cost without a code change. */
-const MODEL = process.env.CODING_AI_MODEL || 'claude-opus-5';
+const PROMPT_VERSION = 'coding-review-gemini-v1';
+const PROVIDER = 'google';
+/**
+ * Gemini 3.1 Flash-Lite by default — cheap, generous quota, ample for reviewing
+ * a single submission. `gemini-flash-lite-latest` tracks the current Flash-Lite;
+ * pin an exact id via CODING_AI_MODEL when you subscribe.
+ */
+const MODEL = process.env.CODING_AI_MODEL || 'gemini-flash-lite-latest';
 
 /** The structured verdict we require back from the model. Enums line up 1:1
  *  with the Prisma enums so persistence is a direct map. */
@@ -54,6 +58,51 @@ const ReviewSchema = z.object({
 });
 type ReviewOutput = z.infer<typeof ReviewSchema>;
 
+/** The same shape expressed for Gemini's structured-output `responseSchema`.
+ *  The returned JSON is still validated against ReviewSchema (zod) before use. */
+const GEMINI_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    overallScore: { type: Type.INTEGER },
+    confidence: { type: Type.STRING, enum: ['HIGH', 'MEDIUM', 'LOW'] },
+    summary: { type: Type.STRING },
+    requirementResults: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          requirementId: { type: Type.STRING },
+          verdict: { type: Type.STRING, enum: ['PASS', 'PARTIAL', 'FAIL'] },
+        },
+        required: ['requirementId', 'verdict'],
+      },
+    },
+    findings: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          kind: {
+            type: Type.STRING,
+            enum: ['BUG', 'SECURITY', 'QUALITY', 'ARCHITECTURE', 'STRENGTH'],
+          },
+          title: { type: Type.STRING },
+          body: { type: Type.STRING },
+          confidence: { type: Type.STRING, enum: ['HIGH', 'MEDIUM', 'LOW'] },
+        },
+        required: ['kind', 'title', 'body', 'confidence'],
+      },
+    },
+  },
+  required: [
+    'overallScore',
+    'confidence',
+    'summary',
+    'requirementResults',
+    'findings',
+  ],
+};
+
 /**
  * Coding Instructor Plugin — the AI code reviewer (Claude). It is an assistant,
  * never the final authority: it reads the student's code against the assignment
@@ -63,12 +112,17 @@ type ReviewOutput = z.infer<typeof ReviewSchema>;
 @Injectable()
 export class CodingAiReviewService {
   private readonly log = new Logger(CodingAiReviewService.name);
-  private readonly anthropic = new Anthropic();
+  // Gemini client; null when GEMINI_API_KEY is unset (review degrades to a
+  // human decision rather than crashing the pipeline).
+  private readonly gemini = process.env.GEMINI_API_KEY
+    ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
+    : null;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly courses: CoursesService,
     private readonly submissions: CodingSubmissionsService,
+    private readonly live: CodingLiveService,
   ) {}
 
   /** After a submission lands, run the review if the assignment opts in. */
@@ -134,14 +188,14 @@ export class CodingAiReviewService {
 
     // No key configured (e.g. local dev): fail the review gracefully and hand
     // the submission to the instructor rather than crashing the pipeline.
-    if (!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) {
+    if (!this.gemini) {
       await this.fail(review.id, submissionId, 'AI review is not configured');
       return;
     }
 
     try {
       const files = await this.submissions.readSubmissionText(submissionId);
-      const output = await this.callClaude(assignment, files);
+      const output = await this.callGemini(assignment, files);
       await this.persist(review.id, submissionId, assignment.requirements, output);
     } catch (err) {
       await this.fail(review.id, submissionId, String(err));
@@ -149,9 +203,9 @@ export class CodingAiReviewService {
     }
   }
 
-  // ---------- Claude call ----------
+  // ---------- Gemini call ----------
 
-  private async callClaude(
+  private async callGemini(
     assignment: {
       title: string;
       description: string | null;
@@ -202,18 +256,32 @@ export class CodingAiReviewService {
       .filter(Boolean)
       .join('\n');
 
-    const response = await this.anthropic.messages.parse({
+    if (!this.gemini) {
+      throw new Error('AI review is not configured');
+    }
+    const response = await this.gemini.models.generateContent({
       model: MODEL,
-      max_tokens: 8000,
-      system,
-      messages: [{ role: 'user', content: user }],
-      output_config: { format: zodOutputFormat(ReviewSchema), effort: 'medium' },
+      contents: `${system}\n\n${user}`,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: GEMINI_SCHEMA,
+        temperature: 0.2,
+      },
     });
 
-    if (!response.parsed_output) {
-      throw new Error('AI review did not return a valid structured result');
+    const raw = response.text ?? '';
+    let json: unknown;
+    try {
+      json = JSON.parse(raw);
+    } catch {
+      throw new Error('AI review did not return valid JSON');
     }
-    return response.parsed_output;
+    // Trust nothing: validate/coerce the model output against our own schema.
+    const parsed = ReviewSchema.safeParse(json);
+    if (!parsed.success) {
+      throw new Error('AI review did not match the expected schema');
+    }
+    return parsed.data;
   }
 
   // ---------- Persistence ----------
@@ -271,6 +339,9 @@ export class CodingAiReviewService {
         },
       }),
     ]);
+
+    // The provisional score just landed — push it to the live board + staff card.
+    await this.live.broadcastSubmissionUpdate(submissionId);
   }
 
   private async fail(reviewId: string, submissionId: string, message: string) {
@@ -285,5 +356,6 @@ export class CodingAiReviewService {
         data: { status: CodingSubmissionStatus.NEEDS_REVIEW },
       }),
     ]);
+    await this.live.broadcastSubmissionUpdate(submissionId);
   }
 }

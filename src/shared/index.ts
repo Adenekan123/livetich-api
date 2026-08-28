@@ -67,6 +67,17 @@ export interface LeaderboardEntry {
   rank: number;
 }
 
+/** One student's standing on a live coding task. `score` is the instructor's
+ *  final score if decided, else the AI provisional; null while still coding.
+ *  Points fan out to everyone in the room — code never does. */
+export interface CodingPointEntry {
+  studentId: string;
+  name: string;
+  /** CodingSubmissionStatus, or 'CODING' when the student hasn't submitted. */
+  status: string;
+  score: number | null;
+}
+
 export interface QuizQuestionPublic {
   questionId: string;
   body: string;
@@ -165,6 +176,41 @@ export interface ServerToClientEvents {
     studentName: string;
     language: string | null;
     submittedAt: string;
+  }) => void;
+
+  /** A coding task went (or is) live in this session — students get a prompt to
+   *  open it in their editor; everyone sees the points board start tracking. */
+  'coding:task': (p: {
+    sessionId: string;
+    assignmentId: string;
+    title: string;
+    language: string | null;
+    requirementCount: number;
+    /** Deadline for a timed live task (ISO), or null if untimed. */
+    dueAt: string | null;
+  }) => void;
+
+  /** Live per-student standings for a session's coding task (scores only, no
+   *  code). Recomputed and pushed on submit, on AI review, and on decision. */
+  'coding:points': (p: {
+    sessionId: string;
+    assignmentId: string;
+    entries: CodingPointEntry[];
+  }) => void;
+
+  /** A coding submission changed — pushed to the staff room so the instructor's
+   *  in-session review card updates without leaking code to peers. */
+  'coding:submission': (p: {
+    sessionId: string;
+    submissionId: string;
+    assignmentId: string;
+    studentId: string;
+    studentName: string;
+    attemptNumber: number;
+    status: string;
+    provisionalScore: number | null;
+    finalScore: number | null;
+    aiConfidence: string | null;
   }) => void;
 
   'quiz:opened': (p: { sessionId: string; question: QuizQuestionPublic }) => void;

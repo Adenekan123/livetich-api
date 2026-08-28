@@ -58,6 +58,12 @@ export class CodingController {
     return this.coding.teaching(user);
   }
 
+  /** Courses + their live / next session, to drive the plugin's new-task form. */
+  @Get('authoring-context')
+  authoringContext(@CurrentUser() user: JwtPayload) {
+    return this.coding.authoringContext(user);
+  }
+
   // ---- Authoring (manager = assigned instructor or org admin) ----
 
   @Post('courses/:courseId/assignments')

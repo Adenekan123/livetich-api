@@ -4,6 +4,7 @@ import {
   ArrayMinSize,
   IsArray,
   IsBoolean,
+  IsEnum,
   IsInt,
   IsISO8601,
   IsOptional,
@@ -14,6 +15,7 @@ import {
   MinLength,
   ValidateNested,
 } from 'class-validator';
+import { CodingAssignmentKind } from '@prisma/client';
 
 export class CreateCodingRequirementDto {
   @IsString()
@@ -76,6 +78,12 @@ export class CreateCodingAssignmentDto {
   @IsString()
   @MaxLength(40)
   difficulty?: string;
+
+  /** Live task (runs in a session now) or assignment (homework for the next
+   *  class). A LIVE kind with a sessionId launches immediately on create. */
+  @IsOptional()
+  @IsEnum(CodingAssignmentKind)
+  kind?: CodingAssignmentKind;
 
   /** Tie the task to a live session so it can be launched as "Practice now". */
   @IsOptional()

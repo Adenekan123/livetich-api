@@ -5,6 +5,7 @@ import { CodingService } from './coding.service';
 import { CodingSubmissionsService } from './coding-submissions.service';
 import { CodingAiReviewService } from './coding-ai-review.service';
 import { CodingInstructorService } from './coding-instructor.service';
+import { CodingLiveService } from './coding-live.service';
 
 /**
  * Coding Instructor Plugin. Covers assignment authoring & delivery, the ZIP
@@ -19,6 +20,7 @@ import { CodingInstructorService } from './coding-instructor.service';
     CodingSubmissionsService,
     CodingAiReviewService,
     CodingInstructorService,
+    CodingLiveService,
   ],
   exports: [
     CodingService,

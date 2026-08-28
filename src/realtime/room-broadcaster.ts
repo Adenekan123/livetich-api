@@ -21,6 +21,18 @@ export class RoomBroadcaster {
     this.server = server;
   }
 
+  /** Emit to everyone in a session room (students included). */
+  emitToSession<E extends keyof ServerToClientEvents>(
+    sessionId: string,
+    event: E,
+    payload: Parameters<ServerToClientEvents[E]>[0],
+  ) {
+    (this.server?.to(sessionId).emit as (e: E, p: unknown) => void)?.(
+      event,
+      payload,
+    );
+  }
+
   /** Emit to the instructor/admins of a session (not students). */
   emitToSessionStaff<E extends keyof ServerToClientEvents>(
     sessionId: string,
