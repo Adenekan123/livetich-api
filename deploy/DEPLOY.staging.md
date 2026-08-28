@@ -32,8 +32,17 @@ Caddy gets Let's Encrypt certs automatically once these resolve.
 
 ### 3. Install Docker + clone both repos (on the staging box)
 ```bash
-# Docker (Ubuntu): https://docs.docker.com/engine/install/ubuntu/
-curl -fsSL https://get.docker.com | sh
+# --- Docker (Ubuntu) ---
+ssh root@<staging-ip>          # from your machine
+apt update
+curl -fsSL https://get.docker.com | sh    # Engine + CLI + compose v2 plugin
+
+# Verify both are present, then confirm the daemon is up.
+docker --version
+docker compose version
+systemctl status docker --no-pager        # want: active (running); q to quit
+# If not running: systemctl enable --now docker
+# (Running as root, so no usermod/docker-group step is needed.)
 
 # Both repos must sit side by side (compose builds ../livetich-web).
 git clone https://github.com/Adenekan123/livetich-api.git
@@ -47,8 +56,10 @@ cd livetich-web && git checkout staging && cd ..
 ### 4. Configure secrets (on the staging box)
 ```bash
 cd livetich-api
-cp deploy/.env.staging.example deploy/.env.staging
-# Edit deploy/.env.staging: set ACME_EMAIL, generate FRESH secrets
+# Target name is .env.prod (docker-compose.prod.yml has `env_file: deploy/.env.prod`
+# baked in). Staging differs by BRANCH + the values inside, not the filename.
+cp deploy/.env.staging.example deploy/.env.prod
+# Edit deploy/.env.prod: set ACME_EMAIL, generate FRESH secrets
 #   (openssl rand -base64 48) for JWT_SECRET + MYSQL passwords,
 #   add a low-quota GEMINI_API_KEY, and your LiveKit staging keys.
 # NEVER reuse production secrets. NEVER commit this file.
@@ -57,7 +68,7 @@ cp deploy/.env.staging.example deploy/.env.staging
 ### 5. Bring it up
 ```bash
 cd livetich-api
-docker compose --env-file deploy/.env.staging -f docker-compose.prod.yml up -d --build
+docker compose --env-file deploy/.env.prod -f docker-compose.prod.yml up -d --build
 ```
 
 Watch it come healthy:
@@ -84,7 +95,7 @@ git push origin staging
 cd livetich-api && git pull
 cd ../livetich-web && git pull
 cd ../livetich-api
-docker compose --env-file deploy/.env.staging -f docker-compose.prod.yml up -d --build
+docker compose --env-file deploy/.env.prod -f docker-compose.prod.yml up -d --build
 ```
 
 Prisma migrations run on API start (`migrate deploy`). If a migration needs a
