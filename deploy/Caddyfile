@@ -4,14 +4,50 @@
 	email {$ACME_EMAIL}
 }
 
+# The platform admin console is IP-restricted at the edge: even a valid operator
+# session can't reach /admin from outside these IPs. ADMIN_ALLOW_IPS is a
+# space-separated list of IPs/CIDRs (add your IPv6 too if you have one).
+# Fail-closed: if unset it defaults to localhost only, blocking all external
+# admin access until you set it. Caddy sees the real client IP (it's the edge).
+
 # Web app
 {$APP_DOMAIN} {
 	encode zstd gzip
-	reverse_proxy web:3000
+
+	# /admin (dashboard) + /admin-unlock (step-up gate)
+	@admin path /admin /admin/* /admin-unlock /admin-unlock/*
+	handle @admin {
+		@allowed remote_ip {$ADMIN_ALLOW_IPS:127.0.0.1/32}
+		handle @allowed {
+			reverse_proxy web:3000
+		}
+		handle {
+			respond "Forbidden — admin access is restricted by IP." 403
+		}
+	}
+
+	handle {
+		reverse_proxy web:3000
+	}
 }
 
 # API (REST + Socket.IO). CORS is handled by the API itself (WEB_ORIGIN).
 {$API_DOMAIN} {
 	encode zstd gzip
-	reverse_proxy api:3000
+
+	# /admin/* API routes — same IP restriction as the dashboard.
+	@admin path /admin /admin/*
+	handle @admin {
+		@allowed remote_ip {$ADMIN_ALLOW_IPS:127.0.0.1/32}
+		handle @allowed {
+			reverse_proxy api:3000
+		}
+		handle {
+			respond "Forbidden — admin access is restricted by IP." 403
+		}
+	}
+
+	handle {
+		reverse_proxy api:3000
+	}
 }

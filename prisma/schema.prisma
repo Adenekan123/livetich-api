@@ -118,6 +118,10 @@ model User {
   id             String     @id @default(cuid())
   role           Role
   status         UserStatus @default(ACTIVE)
+  // Platform operator flag — grants the cross-org /admin console. Deliberately
+  // NOT a Role value so it can't be obtained through registration/invite; it is
+  // set only by another super-admin (or the bootstrap script). See SuperAdminGuard.
+  isSuperAdmin   Boolean    @default(false)
   name           String
   email          String     @unique
   passwordHash   String
@@ -956,4 +960,69 @@ model CodingFeedback {
   author     User             @relation("codingFeedbackAuthor", fields: [authorId], references: [id])
 
   @@index([submissionId])
+}
+
+// ===========================================================================
+// Platform admin: audit trail + AI-model usage tracking
+// ===========================================================================
+
+/// Immutable audit trail of security- and admin-relevant actions. Actor/org are
+/// stored as denormalized snapshots (id + email) rather than FK relations, so a
+/// row survives the user/org being deleted and can never be silently rewritten.
+model AuditLog {
+  id         String   @id @default(cuid())
+  at         DateTime @default(now())
+  // Who did it (null = system/anonymous, e.g. a failed login for an unknown email).
+  actorId    String?
+  actorEmail String?
+  actorRole  String?
+  // Where it happened (the actor's tenant, when applicable).
+  orgId      String?
+  // What happened — a stable dotted slug, e.g. "auth.login.success",
+  // "admin.user.status.changed" (see AuditAction constants in audit.service).
+  action     String
+  // What it acted on.
+  targetType String?
+  targetId   String?
+  // Free-form context (before/after values, reason, etc.). MySQL JSON.
+  metadata   Json?
+  ip         String?
+  userAgent  String?  @db.Text
+
+  @@index([at])
+  @@index([action, at])
+  @@index([actorId, at])
+  @@index([orgId, at])
+  @@index([targetType, targetId])
+}
+
+enum AiUsageFeature {
+  CODING_REVIEW
+  ASSESSMENT_DRAFT
+}
+
+/// One row per AI model call, with token counts and an estimated USD cost, for
+/// the admin usage dashboard. Decoupled snapshots (no FK relations) like AuditLog.
+model AiUsage {
+  id           String         @id @default(cuid())
+  at           DateTime       @default(now())
+  feature      AiUsageFeature
+  provider     String // e.g. "google"
+  model        String // e.g. "gemini-flash-lite-latest"
+  orgId        String?
+  userId       String?
+  promptTokens Int            @default(0)
+  outputTokens Int            @default(0)
+  totalTokens  Int            @default(0)
+  // Estimated cost in USD micro-units? No — store as a Decimal for accuracy.
+  estCostUsd   Decimal        @default(0) @db.Decimal(12, 6)
+  // Optional pointer to the thing reviewed/generated (e.g. a submission id).
+  refId        String?
+  // "ok" | "error" — a failed/again-billed call still records what it cost.
+  status       String         @default("ok")
+
+  @@index([at])
+  @@index([feature, at])
+  @@index([model, at])
+  @@index([orgId, at])
 }

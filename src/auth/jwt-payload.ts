@@ -8,4 +8,5 @@ export interface JwtPayload {
   email: string;
   organizationId: string | null; // tenant the user belongs to
   emailVerified: boolean; // reissued on verify so it stays fresh in the token
+  isSuperAdmin: boolean; // platform operator; gates /admin (guard re-checks the DB)
 }

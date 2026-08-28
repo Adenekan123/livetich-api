@@ -208,6 +208,30 @@ export class AuthService {
     return this.toAuthResult(user);
   }
 
+  /**
+   * Step-up re-authentication for the platform admin console. Verifies the
+   * operator's password again and mints a short-lived "step-up" token proving a
+   * fresh password check. The admin API requires this (fresher still for the
+   * most destructive actions), so a stolen session token alone can't open /admin
+   * or impersonate — the attacker also needs the password.
+   */
+  async adminReauth(
+    userId: string,
+    password: string,
+  ): Promise<{ stepUpToken: string }> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user || !user.isSuperAdmin) {
+      throw new ForbiddenException('Platform admin access required');
+    }
+    const ok = await bcryptVerify(password, user.passwordHash);
+    if (!ok) throw new UnauthorizedException('Incorrect password');
+    const stepUpToken = this.jwt.sign(
+      { su: userId, purpose: 'admin-stepup' },
+      { expiresIn: '30m' },
+    );
+    return { stepUpToken };
+  }
+
   // ---------- helpers ----------
 
   private async assertEmailFree(email: string): Promise<void> {
@@ -260,6 +284,7 @@ export class AuthService {
     role: Role;
     organizationId: string | null;
     emailVerified: boolean;
+    isSuperAdmin: boolean;
   }): AuthResult {
     const payload: JwtPayload = {
       sub: user.id,
@@ -268,6 +293,7 @@ export class AuthService {
       email: user.email,
       organizationId: user.organizationId,
       emailVerified: user.emailVerified,
+      isSuperAdmin: user.isSuperAdmin,
     };
     return {
       accessToken: this.jwt.sign(payload),
@@ -296,6 +322,7 @@ export class AuthService {
       email: user.email,
       organizationId: user.organizationId,
       emailVerified: user.emailVerified,
+      isSuperAdmin: user.isSuperAdmin,
     };
     return { token: this.jwt.sign(payload, { expiresIn: '15m' }) };
   }

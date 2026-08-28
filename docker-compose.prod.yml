@@ -20,6 +20,9 @@ services:
       # Caddyfile references {$ACME_EMAIL}; without it the config fails to parse
       # ("wrong argument count after 'email'") and Caddy crash-loops.
       ACME_EMAIL: ${ACME_EMAIL}
+      # Space-separated IPs/CIDRs allowed to reach /admin. Defaults (in the
+      # Caddyfile) to localhost only — set this to your IP(s) to use the console.
+      ADMIN_ALLOW_IPS: ${ADMIN_ALLOW_IPS:-127.0.0.1/32}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data

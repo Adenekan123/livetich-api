@@ -30,6 +30,8 @@ import { CertificatesModule } from './certificates/certificates.module';
 import { BoardModule } from './board/board.module';
 import { CodeModule } from './code/code.module';
 import { RealtimeModule } from './realtime/realtime.module';
+import { ObservabilityModule } from './observability/observability.module';
+import { AdminModule } from './admin/admin.module';
 
 @Module({
   imports: [
@@ -77,6 +79,8 @@ import { RealtimeModule } from './realtime/realtime.module';
     BoardModule,
     CodeModule,
     RealtimeModule,
+    ObservabilityModule,
+    AdminModule,
   ],
   controllers: [AppController, HealthController],
   providers: [

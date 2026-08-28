@@ -4,6 +4,7 @@ import { z } from 'zod';
 import {
   AiConfidence,
   AiReviewStatus,
+  AiUsageFeature,
   CodingFindingKind,
   CodingSubmissionStatus,
   CodingVerdict,
@@ -11,8 +12,16 @@ import {
 import type { JwtPayload } from '../auth/jwt-payload';
 import { CoursesService } from '../courses/courses.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { AiUsageService } from '../observability/ai-usage.service';
 import { CodingSubmissionsService } from './coding-submissions.service';
 import { CodingLiveService } from './coding-live.service';
+
+/** Token counts pulled from Gemini's usageMetadata (all optional/defensive). */
+interface GeminiUsage {
+  promptTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
 
 /** Bumped when the prompt/schema changes, so a review records how it was made. */
 const PROMPT_VERSION = 'coding-review-gemini-v1';
@@ -123,6 +132,7 @@ export class CodingAiReviewService {
     private readonly courses: CoursesService,
     private readonly submissions: CodingSubmissionsService,
     private readonly live: CodingLiveService,
+    private readonly usage: AiUsageService,
   ) {}
 
   /** After a submission lands, run the review if the assignment opts in. */
@@ -165,6 +175,7 @@ export class CodingAiReviewService {
           include: {
             requirements: { orderBy: { order: 'asc' } },
             rubric: { orderBy: { order: 'asc' } },
+            course: { select: { organizationId: true } },
           },
         },
       },
@@ -195,7 +206,20 @@ export class CodingAiReviewService {
 
     try {
       const files = await this.submissions.readSubmissionText(submissionId);
-      const output = await this.callGemini(assignment, files);
+      const { output, usage } = await this.callGemini(assignment, files);
+      // Meter the call for the admin usage dashboard (best-effort; never throws).
+      this.usage.record({
+        feature: AiUsageFeature.CODING_REVIEW,
+        provider: PROVIDER,
+        model: MODEL,
+        orgId: assignment.course?.organizationId ?? null,
+        userId: submission.studentId,
+        refId: submissionId,
+        promptTokens: usage.promptTokens,
+        outputTokens: usage.outputTokens,
+        totalTokens: usage.totalTokens,
+        status: 'ok',
+      });
       await this.persist(review.id, submissionId, assignment.requirements, output);
     } catch (err) {
       await this.fail(review.id, submissionId, String(err));
@@ -215,7 +239,7 @@ export class CodingAiReviewService {
       rubric: { criterion: string; weight: number; mandatory: boolean; aiInstructions: string | null }[];
     },
     files: { path: string; content: string }[],
-  ): Promise<ReviewOutput> {
+  ): Promise<{ output: ReviewOutput; usage: GeminiUsage }> {
     const requirementLines = assignment.requirements
       .map((r) => `- [${r.id}]${r.mandatory ? ' (MANDATORY)' : ''} ${r.text}`)
       .join('\n');
@@ -281,7 +305,15 @@ export class CodingAiReviewService {
     if (!parsed.success) {
       throw new Error('AI review did not match the expected schema');
     }
-    return parsed.data;
+    const meta = response.usageMetadata;
+    const usage: GeminiUsage = {
+      promptTokens: meta?.promptTokenCount ?? 0,
+      outputTokens: meta?.candidatesTokenCount ?? 0,
+      totalTokens:
+        meta?.totalTokenCount ??
+        (meta?.promptTokenCount ?? 0) + (meta?.candidatesTokenCount ?? 0),
+    };
+    return { output: parsed.data, usage };
   }
 
   // ---------- Persistence ----------
