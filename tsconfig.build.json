@@ -1,4 +1,10 @@
 {
   "extends": "./tsconfig.json",
-  "exclude": ["node_modules", "test", "dist", "**/*spec.ts"]
+  "compilerOptions": {
+    // Pin the emit root to src. Without this, a stray .ts file outside src (e.g.
+    // scripts/) shifts tsc's inferred rootDir to the project root, emitting
+    // dist/src/main.js instead of dist/main.js and breaking `node dist/main.js`.
+    "rootDir": "./src"
+  },
+  "exclude": ["node_modules", "test", "dist", "scripts", "**/*spec.ts"]
 }
