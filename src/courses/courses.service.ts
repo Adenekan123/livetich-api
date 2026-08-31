@@ -12,6 +12,7 @@ import { MailService } from '../mail/mail.service';
 import { aggregateStudentStats } from '../performance/student-stats';
 import { buildCourseIcs } from './calendar-ics';
 import { AssignInstructorDto } from './dto/assign-instructor.dto';
+import { CreateBatchDto } from './dto/create-batch.dto';
 import { CreateCourseDto } from './dto/create-course.dto';
 import { CreateSectionDto } from './dto/create-section.dto';
 import { UpdateCourseDto } from './dto/update-course.dto';
@@ -47,6 +48,209 @@ export class CoursesService {
         instructorId: instructorId ?? null,
         ...this.cohortOverrides(dto),
       },
+    });
+  }
+
+  /**
+   * Create a *batch* (a scheduled instance) of an existing program. The batch
+   * inherits the program's identity (title/description/category/level) and,
+   * unless overridden, its cadence — but owns its own schedule, timezone,
+   * instructor, roster and runtime. The program's content (syllabus,
+   * assessment questions, assignment templates, documents) is snapshotted into
+   * the batch so it teaches and assesses like the program from day one; later
+   * program edits don't retro-change a running batch.
+   */
+  async createBatch(user: JwtPayload, programId: string, dto: CreateBatchDto) {
+    const orgId = this.orgOf(user);
+    const program = await this.prisma.course.findUnique({
+      where: { id: programId },
+      select: {
+        id: true,
+        organizationId: true,
+        instructorId: true,
+        parentCourseId: true,
+        title: true,
+        description: true,
+        posterUrl: true,
+        category: true,
+        level: true,
+        startDate: true,
+        durationWeeks: true,
+        meetingDays: true,
+        meetingTime: true,
+        timezone: true,
+      },
+    });
+    if (!program || program.organizationId !== orgId) {
+      throw new NotFoundException('Program not found');
+    }
+    // One level only: a batch can't itself have batches.
+    if (program.parentCourseId) {
+      throw new BadRequestException(
+        'Batches can only be created on a program, not on another batch',
+      );
+    }
+    if (dto.instructorId) await this.assertOrgInstructor(orgId, dto.instructorId);
+
+    const label = dto.label?.trim();
+    const title = label ? `${program.title} — ${label}` : program.title;
+
+    // Each schedule field falls back to the program's cadence when omitted.
+    const meetingDays =
+      dto.meetingDays !== undefined
+        ? Array.from(new Set(dto.meetingDays)).sort((a, b) => a - b)
+        : program.meetingDays;
+
+    return this.prisma.$transaction(async (tx) => {
+      const batch = await tx.course.create({
+        data: {
+          organizationId: orgId,
+          parentCourseId: program.id,
+          instructorId: dto.instructorId ?? program.instructorId ?? null,
+          title,
+          description: program.description,
+          posterUrl: program.posterUrl,
+          category: program.category,
+          level: program.level,
+          startDate:
+            dto.startDate !== undefined
+              ? new Date(dto.startDate)
+              : program.startDate,
+          durationWeeks: dto.durationWeeks ?? program.durationWeeks,
+          meetingDays:
+            meetingDays == null
+              ? Prisma.DbNull
+              : (meetingDays as Prisma.InputJsonValue),
+          meetingTime: dto.meetingTime ?? program.meetingTime,
+          timezone: dto.timezone ?? program.timezone,
+          scheduleUpdatedAt: new Date(),
+        },
+      });
+      await this.snapshotProgramContent(tx, program.id, batch.id);
+      return batch;
+    });
+  }
+
+  /**
+   * Copy a program's authored content into a fresh batch: syllabus sections
+   * first (so their ids can be remapped), then the assessment questions and
+   * assignment templates that hang off them, then shared documents. Roster- and
+   * runtime-scoped rows (enrollments, groups, sessions, points, certificates,
+   * hifz/coding-per-student targets) are deliberately NOT copied — a batch
+   * starts empty on those.
+   */
+  private async snapshotProgramContent(
+    tx: Prisma.TransactionClient,
+    fromCourseId: string,
+    toCourseId: string,
+  ): Promise<void> {
+    // 1) Sections — recreate and remember old→new ids for FK remapping.
+    const sections = await tx.section.findMany({
+      where: { courseId: fromCourseId },
+      orderBy: { order: 'asc' },
+    });
+    const sectionIdMap = new Map<string, string>();
+    for (const s of sections) {
+      const copy = await tx.section.create({
+        data: {
+          courseId: toCourseId,
+          order: s.order,
+          title: s.title,
+          description: s.description,
+        },
+      });
+      sectionIdMap.set(s.id, copy.id);
+    }
+
+    // 2) Assessment questions (the post-class quiz bank) — sectionId required.
+    const questions = await tx.assessmentQuestion.findMany({
+      where: { courseId: fromCourseId, active: true },
+    });
+    if (questions.length) {
+      await tx.assessmentQuestion.createMany({
+        data: questions.flatMap((q) => {
+          const sectionId = sectionIdMap.get(q.sectionId);
+          if (!sectionId) return []; // orphaned section — skip defensively
+          return [
+            {
+              courseId: toCourseId,
+              sectionId,
+              body: q.body,
+              options: q.options as Prisma.InputJsonValue,
+              correctIndex: q.correctIndex,
+              active: q.active,
+              createdById: q.createdById,
+            },
+          ];
+        }),
+      });
+    }
+
+    // 3) Assignment templates — remap section; drop session/group (runtime/roster).
+    const assignments = await tx.assignment.findMany({
+      where: { courseId: fromCourseId },
+    });
+    if (assignments.length) {
+      await tx.assignment.createMany({
+        data: assignments.map((a) => ({
+          courseId: toCourseId,
+          sectionId: a.sectionId ? (sectionIdMap.get(a.sectionId) ?? null) : null,
+          title: a.title,
+          instructions: a.instructions,
+          dueAt: a.dueAt,
+          maxPoints: a.maxPoints,
+          createdById: a.createdById,
+        })),
+      });
+    }
+
+    // 4) Shared documents — same object-store key (read-only reference).
+    const docs = await tx.courseDocument.findMany({
+      where: { courseId: fromCourseId },
+    });
+    if (docs.length) {
+      await tx.courseDocument.createMany({
+        data: docs.map((d) => ({
+          courseId: toCourseId,
+          filename: d.filename,
+          storageKey: d.storageKey,
+          mimeType: d.mimeType,
+          charCount: d.charCount,
+          extractedText: d.extractedText,
+          createdById: d.createdById,
+        })),
+      });
+    }
+  }
+
+  /** Batches (scheduled instances) of a program, with a light session summary. */
+  async listBatches(user: JwtPayload, programId: string) {
+    // Scope like getCourseFor: same org, and assigned-instructor only.
+    await this.getCourseFor(user, programId);
+    const batches = await this.prisma.course.findMany({
+      where: { parentCourseId: programId },
+      include: {
+        instructor: { select: { id: true, name: true } },
+        _count: { select: { enrollments: true } },
+        sessions: {
+          where: {
+            status: { in: [SessionStatus.LIVE, SessionStatus.SCHEDULED] },
+          },
+          select: { id: true, status: true, scheduledAt: true },
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+    return batches.map(({ sessions, ...c }) => {
+      const live = sessions.find((s) => s.status === SessionStatus.LIVE);
+      const next = sessions
+        .filter((s) => s.status === SessionStatus.SCHEDULED)
+        .sort((a, b) => +a.scheduledAt - +b.scheduledAt)[0];
+      return {
+        ...c,
+        liveSessionId: live?.id ?? null,
+        nextSessionAt: next?.scheduledAt ?? null,
+      };
     });
   }
 

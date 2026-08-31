@@ -170,6 +170,11 @@ model Course {
   id             String   @id @default(cuid())
   organizationId String? // owning tenant (backfilled; always set for new courses)
   instructorId   String? // assigned by the org admin; null = unassigned
+  /// Set on a *batch*: the program (parent Course) it's a scheduled instance of.
+  /// null = this row is itself a program. A program's content (syllabus,
+  /// assessment questions, assignments, documents) is snapshotted into each
+  /// batch at creation; the batch then owns its own schedule + roster + runtime.
+  parentCourseId String?
   title          String
   description    String?  @db.Text
   posterUrl      String?
@@ -189,6 +194,8 @@ model Course {
 
   organization        Organization?        @relation(fields: [organizationId], references: [id])
   instructor          User?                @relation("instructor", fields: [instructorId], references: [id])
+  parentCourse        Course?              @relation("ProgramBatches", fields: [parentCourseId], references: [id])
+  batches             Course[]             @relation("ProgramBatches")
   sections            Section[]
   enrollments         Enrollment[]
   invites             Invite[]
@@ -209,6 +216,7 @@ model Course {
 
   @@index([instructorId])
   @@index([organizationId])
+  @@index([parentCourseId])
 }
 
 model Section {
