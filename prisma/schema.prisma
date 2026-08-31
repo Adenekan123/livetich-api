@@ -66,6 +66,18 @@ model Organization {
   primaryColor String? // hex, e.g. "#0a0a0a" — drives themed accents
   accentColor  String?
   tagline      String?
+
+  // ---- Class preferences (admin toggles; apply to every class in the org) ----
+  /// End class removes students from the room (vs. leaving them on the board).
+  evictOnInstructorLeave Boolean @default(false)
+  /// A student can only be granted the mic while their hand is raised; lowering
+  /// it auto-revokes. (Students are muted-until-granted regardless.)
+  micRequiresRaisedHand  Boolean @default(false)
+  /// Email enrolled students ahead of each class occurrence.
+  preClassReminder       Boolean @default(false)
+  /// Lead time for that reminder, in minutes before the meeting start.
+  reminderLeadMinutes    Int     @default(30)
+
   createdAt    DateTime @default(now())
 
   users      User[]
@@ -191,6 +203,10 @@ model Course {
   timezone          String? // IANA zone or short label shown to students (e.g. "Africa/Lagos" / "WAT")
   /// Bumped whenever a schedule field changes; drives "your reminder is stale".
   scheduleUpdatedAt DateTime?
+  /// Release the class-end quiz to students the moment class ends (default).
+  /// Off = it's held until the instructor releases it. Set by the instructor in
+  /// the Assessments tool. Inherited by batches at creation (snapshot).
+  instantClassAssessment Boolean @default(true)
 
   organization        Organization?        @relation(fields: [organizationId], references: [id])
   instructor          User?                @relation("instructor", fields: [instructorId], references: [id])
@@ -200,6 +216,7 @@ model Course {
   enrollments         Enrollment[]
   invites             Invite[]
   sessions            LiveSession[]
+  sessionReminders    SessionReminder[]
   points              PointsLedger[]
   certificates        Certificate[]
   assignments         Assignment[]
@@ -363,6 +380,20 @@ model Attendance {
 
   @@unique([sessionId, studentId])
   @@index([studentId])
+}
+
+/// One row per (course, meeting day) the pre-class reminder cron has emailed —
+/// the dedupe key so a class occurrence is never reminded twice. `dateKey` is
+/// the occurrence's local calendar day in the course tz ("YYYY-MM-DD").
+model SessionReminder {
+  id       String   @id @default(cuid())
+  courseId String
+  dateKey  String
+  sentAt   DateTime @default(now())
+
+  course Course @relation(fields: [courseId], references: [id])
+
+  @@unique([courseId, dateKey])
 }
 
 model ChatMessage {
@@ -537,6 +568,9 @@ model Assessment {
   sectionId   String? // topic the ended session covered, if any
   /// Frozen string[] of AssessmentQuestion ids, in presentation order.
   questionIds Json
+  /// Visible/gated to students. Set from Course.instantClassAssessment when the
+  /// quiz materialises; a held quiz (false) is released later by the instructor.
+  released    Boolean  @default(true)
   createdAt   DateTime @default(now())
 
   course   Course              @relation(fields: [courseId], references: [id])

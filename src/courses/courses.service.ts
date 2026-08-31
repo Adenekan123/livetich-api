@@ -79,6 +79,7 @@ export class CoursesService {
         meetingDays: true,
         meetingTime: true,
         timezone: true,
+        instantClassAssessment: true,
       },
     });
     if (!program || program.organizationId !== orgId) {
@@ -123,6 +124,7 @@ export class CoursesService {
               : (meetingDays as Prisma.InputJsonValue),
           meetingTime: dto.meetingTime ?? program.meetingTime,
           timezone: dto.timezone ?? program.timezone,
+          instantClassAssessment: program.instantClassAssessment,
           scheduleUpdatedAt: new Date(),
         },
       });

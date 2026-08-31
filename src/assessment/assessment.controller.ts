@@ -23,6 +23,7 @@ import { SubmitAttemptDto } from './dto/submit-attempt.dto';
 import { BatchQuestionsDto } from './dto/batch-questions.dto';
 import { BatchTasksDto } from './dto/batch-tasks.dto';
 import { DraftDto } from './dto/draft.dto';
+import { UpdateAssessmentSettingsDto } from './dto/update-assessment-settings.dto';
 
 @Controller()
 export class AssessmentController {
@@ -177,6 +178,48 @@ export class AssessmentController {
     @Param('taskId') taskId: string,
   ) {
     return this.assessment.deleteTask(user, courseId, taskId);
+  }
+
+  // ---------- Manager: release control ----------
+
+  /** Per-course "release class-end quiz instantly" preference. */
+  @Get('courses/:courseId/assessment/settings')
+  assessmentSettings(
+    @CurrentUser() user: JwtPayload,
+    @Param('courseId') courseId: string,
+  ) {
+    return this.assessment.getSettings(user, courseId);
+  }
+
+  @Patch('courses/:courseId/assessment/settings')
+  updateAssessmentSettings(
+    @CurrentUser() user: JwtPayload,
+    @Param('courseId') courseId: string,
+    @Body() dto: UpdateAssessmentSettingsDto,
+  ) {
+    return this.assessment.setInstantAssessment(
+      user,
+      courseId,
+      dto.instantClassAssessment,
+    );
+  }
+
+  /** Quizzes materialised but still held from students. */
+  @Get('courses/:courseId/assessment/held')
+  listHeld(
+    @CurrentUser() user: JwtPayload,
+    @Param('courseId') courseId: string,
+  ) {
+    return this.assessment.listHeld(user, courseId);
+  }
+
+  @Post('assessments/:assessmentId/release')
+  @HttpCode(200)
+  release(
+    @CurrentUser() user: JwtPayload,
+    @Param('assessmentId') assessmentId: string,
+  ) {
+    return this.assessment.release(user, assessmentId);
   }
 
   // ---------- Student: take assessments + remediation ----------

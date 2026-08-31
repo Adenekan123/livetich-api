@@ -44,6 +44,9 @@ interface SocketData {
   /** An org admin who joined in teach-mode (solo teacher): treated as the
    *  session's host for the life of this socket rather than a shadow observer. */
   teaching?: boolean;
+  /** Org pref stashed at join: a student may hold the mic only while their hand
+   *  is raised (grant blocked without it; lowering the hand auto-revokes). */
+  micRequiresRaisedHand?: boolean;
 }
 
 type RoomServer = Server<
@@ -169,13 +172,20 @@ export class RoomGateway
       where: { id: p.sessionId },
       include: {
         course: {
-          select: { id: true, instructorId: true, organizationId: true },
+          select: {
+            id: true,
+            instructorId: true,
+            organizationId: true,
+            organization: { select: { micRequiresRaisedHand: true } },
+          },
         },
       },
     });
     if (!session || session.status === SessionStatus.ENDED) {
       return this.fail(client, 'NOT_JOINABLE', 'Session not found or ended');
     }
+    client.data.micRequiresRaisedHand =
+      session.course.organization?.micRequiresRaisedHand ?? false;
 
     // Admins shadow-observe silently — unless they entered in teach-mode, where
     // a solo-teacher admin joins visibly as the session host. Everyone else must
@@ -477,7 +487,16 @@ export class RoomGateway
     @MessageBody() p: { sessionId: string },
   ) {
     if (!this.inRoom(client, p.sessionId)) return;
-    await this.state.lowerHand(p.sessionId, client.data.user.sub);
+    const userId = client.data.user.sub;
+    await this.state.lowerHand(p.sessionId, userId);
+    // Org pref: the mic is tied to the raised hand — lowering it drops the mic.
+    if (client.data.micRequiresRaisedHand) {
+      const speakers = await this.state.listSpeakers(p.sessionId);
+      if (speakers.includes(userId)) {
+        await this.state.revokeMic(p.sessionId, userId);
+        await this.broadcastSpeakers(p.sessionId);
+      }
+    }
     await this.broadcastHands(p.sessionId);
   }
 
@@ -727,6 +746,17 @@ export class RoomGateway
     @MessageBody() p: { sessionId: string; userId: string },
   ) {
     if (!(await this.isOwner(client, p.sessionId))) return;
+    // Org pref: a student can only be granted the mic while their hand is up.
+    if (client.data.micRequiresRaisedHand) {
+      const hands = await this.state.listHands(p.sessionId);
+      if (!hands.some((u) => u.userId === p.userId)) {
+        return this.fail(
+          client,
+          'MIC_NEEDS_HAND',
+          'The student must raise their hand first',
+        );
+      }
+    }
     await this.state.grantMic(p.sessionId, p.userId);
     await this.broadcastSpeakers(p.sessionId);
   }

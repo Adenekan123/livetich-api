@@ -101,8 +101,140 @@ async function setup() {
   );
 }
 
+// A held (unreleased) class-end quiz for the release-flow test: an ENDED
+// session marked with an e2e livekitRoom prefix + an Assessment(released=false).
+const HELD_ROOM_PREFIX = 'e2e-held-';
+
+async function seedHeld(courseId) {
+  const questions = await prisma.assessmentQuestion.findMany({
+    where: { courseId, active: true },
+    select: { id: true },
+    take: 5,
+  });
+  const session = await prisma.liveSession.create({
+    data: {
+      courseId,
+      status: 'ENDED',
+      endedAt: new Date(),
+      scheduledAt: new Date(),
+      livekitRoom: `${HELD_ROOM_PREFIX}${Date.now()}`,
+    },
+  });
+  const assessment = await prisma.assessment.create({
+    data: {
+      courseId,
+      sessionId: session.id,
+      questionIds: questions.map((q) => q.id),
+      released: false,
+    },
+  });
+  process.stdout.write(
+    JSON.stringify({ assessmentId: assessment.id, sessionId: session.id }),
+  );
+}
+
+async function cleanupHeld() {
+  const sessions = await prisma.liveSession.findMany({
+    where: { livekitRoom: { startsWith: HELD_ROOM_PREFIX } },
+    select: { id: true },
+  });
+  for (const s of sessions) {
+    await prisma.assessmentAttempt.deleteMany({
+      where: { assessment: { sessionId: s.id } },
+    });
+    await prisma.assessment.deleteMany({ where: { sessionId: s.id } });
+    await prisma.liveSession.delete({ where: { id: s.id } });
+  }
+  console.error(`cleanup: removed ${sessions.length} e2e held quiz(zes)`);
+}
+
+// A throwaway LIVE session for the evict-on-end room test — never the shared
+// board-test session, so ending it can't disturb other specs.
+const LIVE_ROOM_PREFIX = 'e2e-live-';
+
+async function setEvict(on) {
+  const student = await prisma.user.findFirst({
+    where: { email: STUDENT_EMAIL },
+    select: { organizationId: true },
+  });
+  if (!student?.organizationId) throw new Error('test org not found');
+  await prisma.organization.update({
+    where: { id: student.organizationId },
+    data: { evictOnInstructorLeave: on },
+  });
+  console.error(`evict-on-instructor-leave → ${on}`);
+}
+
+async function seedLive(courseId) {
+  const session = await prisma.liveSession.create({
+    data: {
+      courseId,
+      status: 'LIVE',
+      scheduledAt: new Date(),
+      startedAt: new Date(),
+      livekitRoom: `${LIVE_ROOM_PREFIX}${Date.now()}`,
+    },
+  });
+  process.stdout.write(JSON.stringify({ sessionId: session.id, courseId }));
+}
+
+async function cleanupLive() {
+  const sessions = await prisma.liveSession.findMany({
+    where: { livekitRoom: { startsWith: LIVE_ROOM_PREFIX } },
+    select: { id: true },
+  });
+  for (const s of sessions) {
+    await prisma.assessmentAttempt.deleteMany({
+      where: { assessment: { sessionId: s.id } },
+    });
+    await prisma.assessment.deleteMany({ where: { sessionId: s.id } });
+    await prisma.attendance.deleteMany({ where: { sessionId: s.id } });
+    await prisma.chatMessage.deleteMany({ where: { sessionId: s.id } });
+    await prisma.liveSession.delete({ where: { id: s.id } });
+  }
+  console.error(`cleanup: removed ${sessions.length} e2e live session(s)`);
+}
+
+/** Force org class-preferences to a known baseline (all off / lead 30). */
+async function resetPrefs() {
+  const student = await prisma.user.findFirst({
+    where: { email: STUDENT_EMAIL },
+    select: { organizationId: true },
+  });
+  if (student?.organizationId) {
+    await prisma.organization.update({
+      where: { id: student.organizationId },
+      data: {
+        evictOnInstructorLeave: false,
+        micRequiresRaisedHand: false,
+        preClassReminder: false,
+        reminderLeadMinutes: 30,
+      },
+    });
+  }
+  console.error('reset: org class preferences → defaults');
+}
+
 const mode = process.argv[2];
-(mode === '--cleanup' ? cleanup() : setup())
+const run =
+  mode === '--cleanup'
+    ? cleanup()
+    : mode === '--seed-held'
+      ? seedHeld(process.argv[3])
+      : mode === '--cleanup-held'
+        ? cleanupHeld()
+        : mode === '--reset-prefs'
+          ? resetPrefs()
+          : mode === '--evict-on'
+            ? setEvict(true)
+            : mode === '--evict-off'
+              ? setEvict(false)
+              : mode === '--seed-live'
+                ? seedLive(process.argv[3])
+                : mode === '--cleanup-live'
+                  ? cleanupLive()
+                  : setup();
+run
   .catch((e) => {
     console.error('helper error:', e.message);
     process.exit(1);
