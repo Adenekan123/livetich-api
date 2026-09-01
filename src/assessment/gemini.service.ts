@@ -5,6 +5,8 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { GoogleGenAI, Type } from '@google/genai';
+import { AiUsageFeature } from '@prisma/client';
+import { AiUsageService } from '../observability/ai-usage.service';
 
 export interface DraftQuestion {
   body: string;
@@ -34,7 +36,10 @@ export class GeminiService {
   private readonly client: GoogleGenAI | null;
   private readonly model: string;
 
-  constructor(config: ConfigService) {
+  constructor(
+    config: ConfigService,
+    private readonly usage: AiUsageService,
+  ) {
     const apiKey = config.get<string>('GEMINI_API_KEY');
     // Flash-Lite: cheap, generous free-tier quota, ample for authoring-time
     // drafting. Override with GEMINI_MODEL if you have quota on a bigger model.
@@ -49,13 +54,16 @@ export class GeminiService {
     return this.client !== null;
   }
 
-  async draftAssessment(input: {
-    courseTitle: string;
-    sectionTitle: string;
-    sourceText: string;
-    questionCount: number;
-    taskCount: number;
-  }): Promise<DraftResult> {
+  async draftAssessment(
+    input: {
+      courseTitle: string;
+      sectionTitle: string;
+      sourceText: string;
+      questionCount: number;
+      taskCount: number;
+    },
+    meta?: { orgId?: string | null; userId?: string | null; refId?: string | null },
+  ): Promise<DraftResult> {
     if (!this.client) {
       throw new ServiceUnavailableException('AI drafting is not configured');
     }
@@ -117,6 +125,20 @@ export class GeminiService {
         },
       });
       raw = response.text ?? '';
+      // Meter the call for the admin usage dashboard (best-effort; never throws).
+      const um = response.usageMetadata;
+      this.usage.record({
+        feature: AiUsageFeature.ASSESSMENT_DRAFT,
+        provider: 'google',
+        model: this.model,
+        orgId: meta?.orgId ?? null,
+        userId: meta?.userId ?? null,
+        refId: meta?.refId ?? null,
+        promptTokens: um?.promptTokenCount ?? 0,
+        outputTokens: um?.candidatesTokenCount ?? 0,
+        totalTokens: um?.totalTokenCount ?? 0,
+        status: 'ok',
+      });
     } catch (e) {
       this.logger.error(`Gemini request failed: ${String(e)}`);
       throw new ServiceUnavailableException('AI drafting failed — try again');

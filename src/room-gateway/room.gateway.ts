@@ -477,7 +477,16 @@ export class RoomGateway
     @MessageBody() p: { sessionId: string },
   ) {
     if (!this.inRoom(client, p.sessionId)) return;
-    await this.state.lowerHand(p.sessionId, client.data.user.sub);
+    const userId = client.data.user.sub;
+    await this.state.lowerHand(p.sessionId, userId);
+    // Org pref: the mic is tied to the raised hand — lowering it drops the mic.
+    if (await this.micNeedsHand(p.sessionId)) {
+      const speakers = await this.state.listSpeakers(p.sessionId);
+      if (speakers.includes(userId)) {
+        await this.state.revokeMic(p.sessionId, userId);
+        await this.broadcastSpeakers(p.sessionId);
+      }
+    }
     await this.broadcastHands(p.sessionId);
   }
 
@@ -727,6 +736,19 @@ export class RoomGateway
     @MessageBody() p: { sessionId: string; userId: string },
   ) {
     if (!(await this.isOwner(client, p.sessionId))) return;
+    // Org pref: a student can only be granted the mic while their hand is up.
+    // Read fresh (not stashed) so an admin toggling it mid-class takes effect
+    // immediately, without anyone rejoining.
+    if (await this.micNeedsHand(p.sessionId)) {
+      const hands = await this.state.listHands(p.sessionId);
+      if (!hands.some((u) => u.userId === p.userId)) {
+        return this.fail(
+          client,
+          'MIC_NEEDS_HAND',
+          'The student must raise their hand first',
+        );
+      }
+    }
     await this.state.grantMic(p.sessionId, p.userId);
     await this.broadcastSpeakers(p.sessionId);
   }
@@ -826,6 +848,20 @@ export class RoomGateway
     if (client.rooms.has(sessionId)) return true;
     this.fail(client, 'NOT_IN_ROOM', 'Join the room first');
     return false;
+  }
+
+  /** Whether this session's org requires a raised hand before the mic — read
+   *  fresh so an admin's toggle applies to a class already in progress. */
+  private async micNeedsHand(sessionId: string): Promise<boolean> {
+    const session = await this.prisma.liveSession.findUnique({
+      where: { id: sessionId },
+      select: {
+        course: {
+          select: { organization: { select: { micRequiresRaisedHand: true } } },
+        },
+      },
+    });
+    return session?.course.organization?.micRequiresRaisedHand ?? false;
   }
 
   private async isOwner(client: RoomSocket, sessionId: string) {

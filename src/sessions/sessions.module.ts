@@ -5,10 +5,11 @@ import { LivekitService } from './livekit.service';
 import { SessionsController } from './sessions.controller';
 import { SessionsService } from './sessions.service';
 import { VoiceController } from './voice.controller';
+import { BoardAssetController } from './board-asset.controller';
 
 @Module({
   imports: [CoursesModule, AssessmentModule],
-  controllers: [SessionsController, VoiceController],
+  controllers: [SessionsController, VoiceController, BoardAssetController],
   providers: [SessionsService, LivekitService],
   exports: [SessionsService, LivekitService],
 })

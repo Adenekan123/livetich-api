@@ -1,7 +1,10 @@
-import { Body, Controller, Get, HttpCode, Post } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Post, Req } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
+import type { Request } from 'express';
+import { AuditAction, AuditService, clientIp } from '../observability/audit.service';
 import { AuthService } from './auth.service';
 import { CurrentUser } from './current-user.decorator';
+import { AdminReauthDto } from './dto/admin-reauth.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
@@ -16,7 +19,10 @@ import type { JwtPayload } from './jwt-payload';
 @Throttle({ default: { limit: 20, ttl: 60_000 } })
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly auth: AuthService) {}
+  constructor(
+    private readonly auth: AuthService,
+    private readonly audit: AuditService,
+  ) {}
 
   @Public()
   @Post('register')
@@ -27,23 +33,69 @@ export class AuthController {
   /** Company signup: creates the org + its first admin. */
   @Public()
   @Post('register-organization')
-  registerOrganization(@Body() dto: RegisterOrganizationDto) {
-    return this.auth.registerOrganization(dto);
+  async registerOrganization(
+    @Body() dto: RegisterOrganizationDto,
+    @Req() req: Request,
+  ) {
+    const result = await this.auth.registerOrganization(dto);
+    this.audit.record({
+      action: AuditAction.ORG_CREATED,
+      actorId: result.user.id,
+      actorEmail: result.user.email,
+      actorRole: result.user.role,
+      orgId: result.user.organizationId,
+      targetType: 'organization',
+      targetId: result.user.organizationId,
+      metadata: { organizationName: dto.organizationName },
+      ip: clientIp(req),
+      userAgent: req.headers['user-agent'] ?? null,
+    });
+    return result;
   }
 
   @Public()
   @HttpCode(200)
   @Post('login')
-  login(@Body() dto: LoginDto) {
-    return this.auth.login(dto);
+  async login(@Body() dto: LoginDto, @Req() req: Request) {
+    const ip = clientIp(req);
+    const userAgent = req.headers['user-agent'] ?? null;
+    try {
+      const result = await this.auth.login(dto);
+      this.audit.record({
+        action: AuditAction.AUTH_LOGIN_SUCCESS,
+        actorId: result.user.id,
+        actorEmail: result.user.email,
+        actorRole: result.user.role,
+        orgId: result.user.organizationId,
+        ip,
+        userAgent,
+      });
+      return result;
+    } catch (err) {
+      // Record the attempt (email only — no account is confirmed to exist).
+      this.audit.record({
+        action: AuditAction.AUTH_LOGIN_FAILURE,
+        actorEmail: dto.email,
+        metadata: { reason: (err as Error)?.message ?? 'failed' },
+        ip,
+        userAgent,
+      });
+      throw err;
+    }
   }
 
   @Public()
   @Throttle({ default: { limit: 4, ttl: 60_000 } }) // email send — anti-bombing
   @HttpCode(200)
   @Post('forgot-password')
-  async forgotPassword(@Body() dto: ForgotPasswordDto) {
+  async forgotPassword(@Body() dto: ForgotPasswordDto, @Req() req: Request) {
     await this.auth.requestPasswordReset(dto.email);
+    this.audit.record({
+      action: AuditAction.AUTH_PASSWORD_RESET_REQUEST,
+      actorEmail: dto.email,
+      ip: clientIp(req),
+      userAgent: req.headers['user-agent'] ?? null,
+    });
     return { ok: true };
   }
 
@@ -86,6 +138,14 @@ export class AuthController {
   @Post('verify-email')
   verifyEmail(@CurrentUser() user: JwtPayload, @Body() dto: VerifyEmailDto) {
     return this.auth.verifyEmail(user.sub, dto.code);
+  }
+
+  /** Step-up re-auth for the platform admin console — see AuthService.adminReauth. */
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @HttpCode(200)
+  @Post('admin-reauth')
+  adminReauth(@CurrentUser() user: JwtPayload, @Body() dto: AdminReauthDto) {
+    return this.auth.adminReauth(user.sub, dto.password);
   }
 
   @HttpCode(200)

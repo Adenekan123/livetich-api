@@ -10,6 +10,7 @@ import type { JwtPayload } from '../auth/jwt-payload';
 import { AssessmentService } from '../assessment/assessment.service';
 import { CoursesService } from '../courses/courses.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { RoomBroadcaster } from '../realtime/room-broadcaster';
 import { CreateSessionDto } from './dto/create-session.dto';
 import { LivekitService } from './livekit.service';
 import { resolveJoinWindow } from './session-schedule';
@@ -32,6 +33,7 @@ export class SessionsService {
     private readonly courses: CoursesService,
     private readonly livekit: LivekitService,
     private readonly assessment: AssessmentService,
+    private readonly broadcaster: RoomBroadcaster,
   ) {}
 
   async schedule(instructorId: string, dto: CreateSessionDto) {
@@ -130,14 +132,33 @@ export class SessionsService {
       where: { id },
       data: { status: SessionStatus.ENDED, endedAt: new Date() },
     });
+
+    // Class preferences that fire on end: whether the quiz releases instantly,
+    // and whether students are evicted from the room.
+    const course = await this.prisma.course.findUnique({
+      where: { id: ended.courseId },
+      select: {
+        instantClassAssessment: true,
+        organization: { select: { evictOnInstructorLeave: true } },
+      },
+    });
+
     // Materialise the class-end assessment (best-effort; no question bank → no-op).
+    // Held (unreleased) when the course opts out of instant release.
     void this.assessment
-      .createForSession({
-        id: ended.id,
-        courseId: ended.courseId,
-        sectionId: ended.sectionId,
-      })
+      .createForSession(
+        { id: ended.id, courseId: ended.courseId, sectionId: ended.sectionId },
+        course?.instantClassAssessment ?? true,
+      )
       .catch(() => {});
+
+    // Evict students to the course page (they don't linger on a dead board).
+    if (course?.organization?.evictOnInstructorLeave) {
+      this.broadcaster.emitToSession(ended.id, 'room:closed', {
+        sessionId: ended.id,
+        reason: 'ENDED',
+      });
+    }
     return ended;
   }
 

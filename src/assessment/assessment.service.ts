@@ -211,11 +211,16 @@ export class AssessmentService {
    * session had no section). Best-effort: returns null when there's no bank yet
    * or one already exists. Called fire-and-forget from SessionsService.end.
    */
-  async createForSession(session: {
-    id: string;
-    courseId: string;
-    sectionId: string | null;
-  }): Promise<{ id: string } | null> {
+  async createForSession(
+    session: {
+      id: string;
+      courseId: string;
+      sectionId: string | null;
+    },
+    /** Release the quiz to students immediately (course preference). When false
+     *  it's held until the instructor releases it. */
+    released = true,
+  ): Promise<{ id: string } | null> {
     const existing = await this.prisma.assessment.findUnique({
       where: { sessionId: session.id },
       select: { id: true },
@@ -240,8 +245,73 @@ export class AssessmentService {
         sessionId: session.id,
         sectionId: session.sectionId,
         questionIds: questions.map((q) => q.id),
+        released,
       },
       select: { id: true },
+    });
+  }
+
+  // ============== Runtime: release control (manager) ==============
+
+  /** The per-course "release the class-end quiz instantly" preference. */
+  async getSettings(user: JwtPayload, courseId: string) {
+    await this.courses.assertCanManageCourse(user, courseId);
+    const course = await this.prisma.course.findUnique({
+      where: { id: courseId },
+      select: { instantClassAssessment: true },
+    });
+    if (!course) throw new NotFoundException('Course not found');
+    return course;
+  }
+
+  async setInstantAssessment(
+    user: JwtPayload,
+    courseId: string,
+    instant: boolean,
+  ) {
+    await this.courses.assertCanManageCourse(user, courseId);
+    return this.prisma.course.update({
+      where: { id: courseId },
+      data: { instantClassAssessment: instant },
+      select: { instantClassAssessment: true },
+    });
+  }
+
+  /** Materialised quizzes still held (unreleased) — the manager releases these. */
+  async listHeld(user: JwtPayload, courseId: string) {
+    await this.courses.assertCanManageCourse(user, courseId);
+    const held = await this.prisma.assessment.findMany({
+      where: { courseId, released: false },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        session: {
+          select: { endedAt: true, section: { select: { title: true } } },
+        },
+        _count: { select: { attempts: true } },
+      },
+    });
+    return held.map((a) => ({
+      id: a.id,
+      createdAt: a.createdAt,
+      endedAt: a.session.endedAt,
+      topic: a.session.section?.title ?? null,
+      questionCount: this.questionIds(a.questionIds).length,
+    }));
+  }
+
+  /** Release a held quiz to students. Idempotent. */
+  async release(user: JwtPayload, assessmentId: string) {
+    const assessment = await this.prisma.assessment.findUnique({
+      where: { id: assessmentId },
+      select: { id: true, courseId: true, released: true },
+    });
+    if (!assessment) throw new NotFoundException('Assessment not found');
+    await this.courses.assertCanManageCourse(user, assessment.courseId);
+    if (assessment.released) return { id: assessment.id, released: true };
+    return this.prisma.assessment.update({
+      where: { id: assessmentId },
+      data: { released: true },
+      select: { id: true, released: true },
     });
   }
 
@@ -251,7 +321,9 @@ export class AssessmentService {
   async listMine(user: JwtPayload, courseId: string) {
     await this.assertEnrolled(user.sub, courseId);
     const assessments = await this.prisma.assessment.findMany({
-      where: { courseId },
+      // Held (unreleased) quizzes stay invisible to students until the
+      // instructor releases them.
+      where: { courseId, released: true },
       orderBy: { createdAt: 'desc' },
       include: {
         attempts: { where: { studentId: user.sub } },
@@ -286,6 +358,8 @@ export class AssessmentService {
       },
     });
     if (!assessment) throw new NotFoundException('Assessment not found');
+    // A held quiz doesn't exist as far as students are concerned.
+    if (!assessment.released) throw new NotFoundException('Assessment not found');
     await this.assertEnrolled(user.sub, assessment.courseId);
 
     const ids = this.questionIds(assessment.questionIds);
@@ -336,6 +410,7 @@ export class AssessmentService {
       where: { id: assessmentId },
     });
     if (!assessment) throw new NotFoundException('Assessment not found');
+    if (!assessment.released) throw new NotFoundException('Assessment not found');
     await this.assertEnrolled(user.sub, assessment.courseId);
 
     const existing = await this.prisma.assessmentAttempt.findUnique({

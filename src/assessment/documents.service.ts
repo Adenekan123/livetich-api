@@ -122,13 +122,16 @@ export class DocumentsService {
     if (!section) throw new NotFoundException('Section not found in course');
 
     const questionCount = Math.min(Math.max(dto.count ?? 5, 1), 15);
-    const result = await this.gemini.draftAssessment({
-      courseTitle: course?.title ?? 'this course',
-      sectionTitle: section.title,
-      sourceText: doc.extractedText,
-      questionCount,
-      taskCount: Math.min(questionCount, 3),
-    });
+    const result = await this.gemini.draftAssessment(
+      {
+        courseTitle: course?.title ?? 'this course',
+        sectionTitle: section.title,
+        sourceText: doc.extractedText,
+        questionCount,
+        taskCount: Math.min(questionCount, 3),
+      },
+      { orgId: user.organizationId, userId: user.sub, refId: courseId },
+    );
     return { sectionId: dto.sectionId, ...result };
   }
 

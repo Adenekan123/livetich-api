@@ -17,6 +17,7 @@ import { Roles } from '../auth/roles.guard';
 import { CreateInviteDto } from './dto/create-invite.dto';
 import { SetMemberStatusDto } from './dto/set-member-status.dto';
 import { UpdateBrandDto } from './dto/update-brand.dto';
+import { UpdateOrgSettingsDto } from './dto/update-org-settings.dto';
 import { OrganizationsService } from './organizations.service';
 
 /** Every user carries an org; admin-only routes also need one to act on. */
@@ -41,6 +42,23 @@ export class OrganizationsController {
   @Roles(Role.ORG_ADMIN)
   updateBrand(@CurrentUser() user: JwtPayload, @Body() dto: UpdateBrandDto) {
     return this.orgs.updateBrand(orgOf(user), dto);
+  }
+
+  // ---------- Class preferences ----------
+
+  /** Read the org's class preferences — any member (the room adapts its UI). */
+  @Get('settings')
+  settings(@CurrentUser() user: JwtPayload) {
+    return this.orgs.getSettings(user.organizationId);
+  }
+
+  @Patch('settings')
+  @Roles(Role.ORG_ADMIN)
+  updateSettings(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: UpdateOrgSettingsDto,
+  ) {
+    return this.orgs.updateSettings(orgOf(user), dto);
   }
 
   // ---------- Members ----------

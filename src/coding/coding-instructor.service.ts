@@ -3,6 +3,7 @@ import { CodingSubmissionStatus, CodingVerdict } from '@prisma/client';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { CoursesService } from '../courses/courses.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { CodingLiveService } from './coding-live.service';
 import { CreateFeedbackDto } from './dto/feedback.dto';
 import { DecisionDto, DecisionKind } from './dto/decision.dto';
 
@@ -23,6 +24,7 @@ export class CodingInstructorService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly courses: CoursesService,
+    private readonly live: CodingLiveService,
   ) {}
 
   /**
@@ -154,7 +156,7 @@ export class CodingInstructorService {
           ? CodingVerdict.FAIL
           : null;
 
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
       if (dto.feedback?.trim()) {
         await tx.codingFeedback.create({
           data: {
@@ -177,6 +179,10 @@ export class CodingInstructorService {
         include: { feedback: { orderBy: { createdAt: 'asc' } } },
       });
     });
+
+    // The final ruling overrides the AI — push it to the live board + staff card.
+    await this.live.broadcastSubmissionUpdate(submissionId);
+    return result;
   }
 
   // ---------- Helpers ----------

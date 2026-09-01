@@ -10,8 +10,17 @@ import { AuthCacheService } from '../auth/auth-cache.service';
 import { aggregateStudentStats } from '../performance/student-stats';
 import { CreateInviteDto } from './dto/create-invite.dto';
 import { UpdateBrandDto } from './dto/update-brand.dto';
+import { UpdateOrgSettingsDto } from './dto/update-org-settings.dto';
 
 export type InviteStatus = 'ACTIVE' | 'EXPIRED' | 'USED_UP' | 'REVOKED';
+
+/** Org-wide class preferences (admin toggles). */
+const SETTINGS_SELECT = {
+  evictOnInstructorLeave: true,
+  micRequiresRaisedHand: true,
+  preClassReminder: true,
+  reminderLeadMinutes: true,
+} as const;
 
 /** Public brand kit fields — safe to expose on the join page. */
 const BRAND_SELECT = {
@@ -44,6 +53,23 @@ export class OrganizationsService {
       where: { id: orgId },
       data: dto,
       select: BRAND_SELECT,
+    });
+  }
+
+  /** Class preferences for the requester's org (any member may read them). */
+  getSettings(orgId: string | null) {
+    if (!orgId) return null;
+    return this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: SETTINGS_SELECT,
+    });
+  }
+
+  updateSettings(orgId: string, dto: UpdateOrgSettingsDto) {
+    return this.prisma.organization.update({
+      where: { id: orgId },
+      data: dto,
+      select: SETTINGS_SELECT,
     });
   }
 

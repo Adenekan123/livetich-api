@@ -16,6 +16,7 @@ import type { JwtPayload } from '../auth/jwt-payload';
 import { Roles } from '../auth/roles.guard';
 import { CoursesService } from './courses.service';
 import { AssignInstructorDto } from './dto/assign-instructor.dto';
+import { CreateBatchDto } from './dto/create-batch.dto';
 import { CreateCourseDto } from './dto/create-course.dto';
 import { EnrollStudentDto } from './dto/enroll-student.dto';
 import { CreateSectionDto } from './dto/create-section.dto';
@@ -83,6 +84,32 @@ export class CoursesController {
   @Roles(Role.ORG_ADMIN)
   create(@CurrentUser() user: JwtPayload, @Body() dto: CreateCourseDto) {
     return this.courses.createCourse(user, dto);
+  }
+
+  // ---------- Batches (scheduled instances of a program) ----------
+
+  /** Batches of a program — visible to anyone who can see the program. */
+  @Get(':id/batches')
+  listBatches(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.courses.listBatches(user, id);
+  }
+
+  /** Org admin spins up a new batch of a program (own schedule + roster). */
+  @Post(':id/batches')
+  @Roles(Role.ORG_ADMIN)
+  createBatch(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Body() dto: CreateBatchDto,
+  ) {
+    return this.courses.createBatch(user, id, dto);
+  }
+
+  /** Danger zone: permanently delete a program (or batch) and all its data. */
+  @Delete(':id')
+  @Roles(Role.ORG_ADMIN)
+  remove(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.courses.deleteCourse(user, id);
   }
 
   @Patch(':id/instructor')

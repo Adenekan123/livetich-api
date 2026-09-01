@@ -3,10 +3,17 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { CodingAssignmentStatus, Prisma, Role } from '@prisma/client';
+import {
+  CodingAssignmentKind,
+  CodingAssignmentStatus,
+  Prisma,
+  Role,
+  SessionStatus,
+} from '@prisma/client';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { CoursesService } from '../courses/courses.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { CodingLiveService } from './coding-live.service';
 import { CreateCodingAssignmentDto } from './dto/create-coding-assignment.dto';
 import { UpdateCodingAssignmentDto } from './dto/update-coding-assignment.dto';
 
@@ -20,9 +27,11 @@ export class CodingService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly courses: CoursesService,
+    private readonly live: CodingLiveService,
   ) {}
 
-  /** Assigned instructor or org admin authors a coding assignment. */
+  /** Assigned instructor or org admin authors a coding assignment. A LIVE-kind
+   *  task tied to a session opens immediately and is broadcast to the room. */
   async create(
     user: JwtPayload,
     courseId: string,
@@ -31,17 +40,35 @@ export class CodingService {
     await this.courses.assertCanManageCourse(user, courseId);
     if (dto.sessionId) await this.assertSessionInCourse(dto.sessionId, courseId);
 
-    return this.prisma.codingAssignment.create({
+    const kind = dto.kind ?? CodingAssignmentKind.ASSIGNMENT;
+    // A live task with a session launches on create; everything else drafts.
+    const launchLive =
+      kind === CodingAssignmentKind.LIVE && Boolean(dto.sessionId);
+
+    // A timed live task counts down from launch: its deadline is now + limit.
+    // An untimed task (or an assignment) keeps the explicit dueAt if given.
+    const dueAt =
+      launchLive && dto.timeLimitSec
+        ? new Date(Date.now() + dto.timeLimitSec * 1000)
+        : dto.dueAt
+          ? new Date(dto.dueAt)
+          : null;
+
+    const assignment = await this.prisma.codingAssignment.create({
       data: {
         courseId,
+        kind,
         sessionId: dto.sessionId ?? null,
+        status: launchLive
+          ? CodingAssignmentStatus.LIVE
+          : CodingAssignmentStatus.DRAFT,
         createdById: user.sub,
         title: dto.title,
         description: dto.description ?? null,
         language: dto.language ?? null,
         framework: dto.framework ?? null,
         difficulty: dto.difficulty ?? null,
-        dueAt: dto.dueAt ? new Date(dto.dueAt) : null,
+        dueAt,
         timeLimitSec: dto.timeLimitSec ?? null,
         ...scalarDefaults(dto),
         requirements: {
@@ -65,6 +92,9 @@ export class CodingService {
       },
       include: fullInclude,
     });
+
+    if (launchLive) await this.live.broadcastTask(assignment.id);
+    return assignment;
   }
 
   /** Patch scalar fields; replace requirements/rubric wholesale when supplied. */
@@ -243,15 +273,69 @@ export class CodingService {
     return assignments.map((a) => ({
       id: a.id,
       title: a.title,
+      kind: a.kind,
       courseId: a.courseId,
       courseTitle: a.course.title,
       language: a.language,
       framework: a.framework,
       status: a.status,
       dueAt: a.dueAt,
+      sessionId: a.sessionId,
       sessionLive: a.session?.status === 'LIVE',
       submissionCount: a._count.submissions,
     }));
+  }
+
+  /**
+   * Authoring context for the plugin's "New coding task" form: the manager's
+   * courses, each with its currently-live session (for a Live task) and next
+   * scheduled session (for an Assignment against the next class).
+   */
+  async authoringContext(user: JwtPayload) {
+    const courseWhere: Prisma.CourseWhereInput =
+      user.role === Role.ORG_ADMIN
+        ? user.organizationId
+          ? { organizationId: user.organizationId }
+          : { id: '__none__' }
+        : { instructorId: user.sub };
+
+    const courses = await this.prisma.course.findMany({
+      where: courseWhere,
+      select: { id: true, title: true },
+      orderBy: { title: 'asc' },
+    });
+    if (courses.length === 0) return [];
+
+    const courseIds = courses.map((c) => c.id);
+    const sessions = await this.prisma.liveSession.findMany({
+      where: {
+        courseId: { in: courseIds },
+        status: { in: [SessionStatus.LIVE, SessionStatus.SCHEDULED] },
+      },
+      select: { id: true, courseId: true, status: true, scheduledAt: true },
+      orderBy: { scheduledAt: 'asc' },
+    });
+
+    const now = Date.now();
+    return courses.map((c) => {
+      const own = sessions.filter((s) => s.courseId === c.id);
+      const live = own.find((s) => s.status === SessionStatus.LIVE) ?? null;
+      const next =
+        own.find(
+          (s) =>
+            s.status === SessionStatus.SCHEDULED &&
+            s.scheduledAt.getTime() >= now,
+        ) ??
+        own.find((s) => s.status === SessionStatus.SCHEDULED) ??
+        null;
+      return {
+        id: c.id,
+        title: c.title,
+        liveSessionId: live?.id ?? null,
+        nextSessionId: next?.id ?? null,
+        nextSessionAt: next?.scheduledAt ?? null,
+      };
+    });
   }
 
   /** Launch a task live ("Practice now") — moves it to LIVE and (optionally)
@@ -261,14 +345,21 @@ export class CodingService {
     if (sessionId) {
       await this.assertSessionInCourse(sessionId, assignment.courseId);
     }
-    return this.prisma.codingAssignment.update({
+    const updated = await this.prisma.codingAssignment.update({
       where: { id },
       data: {
         status: CodingAssignmentStatus.LIVE,
         sessionId: sessionId ?? assignment.sessionId,
+        // A timed task's countdown starts now, from this launch.
+        ...(assignment.timeLimitSec
+          ? { dueAt: new Date(Date.now() + assignment.timeLimitSec * 1000) }
+          : {}),
       },
       include: fullInclude,
     });
+    // Announce it to the room (no-op if it ended up bound to no session).
+    await this.live.broadcastTask(updated.id);
+    return updated;
   }
 
   /** Close a task — no further submissions accepted. */
@@ -286,7 +377,13 @@ export class CodingService {
   async getManageable(user: JwtPayload, id: string) {
     const assignment = await this.prisma.codingAssignment.findUnique({
       where: { id },
-      select: { id: true, courseId: true, sessionId: true, status: true },
+      select: {
+        id: true,
+        courseId: true,
+        sessionId: true,
+        status: true,
+        timeLimitSec: true,
+      },
     });
     if (!assignment) throw new NotFoundException('Assignment not found');
     await this.courses.assertCanManageCourse(user, assignment.courseId);

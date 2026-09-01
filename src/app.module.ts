@@ -3,6 +3,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerModule } from '@nestjs/throttler';
+import { ScheduleModule } from '@nestjs/schedule';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuthCacheModule } from './auth/auth-cache.service';
@@ -30,10 +31,14 @@ import { CertificatesModule } from './certificates/certificates.module';
 import { BoardModule } from './board/board.module';
 import { CodeModule } from './code/code.module';
 import { RealtimeModule } from './realtime/realtime.module';
+import { ObservabilityModule } from './observability/observability.module';
+import { AdminModule } from './admin/admin.module';
+import { RemindersModule } from './reminders/reminders.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    ScheduleModule.forRoot(),
     // Baseline abuse protection: 120 requests / minute per IP across the API.
     // Auth endpoints tighten this further via @Throttle. NOTE: default storage
     // is in-memory (per-instance) — switch to a Redis store for multi-instance.
@@ -77,6 +82,9 @@ import { RealtimeModule } from './realtime/realtime.module';
     BoardModule,
     CodeModule,
     RealtimeModule,
+    ObservabilityModule,
+    AdminModule,
+    RemindersModule,
   ],
   controllers: [AppController, HealthController],
   providers: [

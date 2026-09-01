@@ -66,6 +66,18 @@ model Organization {
   primaryColor String? // hex, e.g. "#0a0a0a" — drives themed accents
   accentColor  String?
   tagline      String?
+
+  // ---- Class preferences (admin toggles; apply to every class in the org) ----
+  /// End class removes students from the room (vs. leaving them on the board).
+  evictOnInstructorLeave Boolean @default(false)
+  /// A student can only be granted the mic while their hand is raised; lowering
+  /// it auto-revokes. (Students are muted-until-granted regardless.)
+  micRequiresRaisedHand  Boolean @default(false)
+  /// Email enrolled students ahead of each class occurrence.
+  preClassReminder       Boolean @default(false)
+  /// Lead time for that reminder, in minutes before the meeting start.
+  reminderLeadMinutes    Int     @default(30)
+
   createdAt    DateTime @default(now())
 
   users      User[]
@@ -118,6 +130,10 @@ model User {
   id             String     @id @default(cuid())
   role           Role
   status         UserStatus @default(ACTIVE)
+  // Platform operator flag — grants the cross-org /admin console. Deliberately
+  // NOT a Role value so it can't be obtained through registration/invite; it is
+  // set only by another super-admin (or the bootstrap script). See SuperAdminGuard.
+  isSuperAdmin   Boolean    @default(false)
   name           String
   email          String     @unique
   passwordHash   String
@@ -166,6 +182,11 @@ model Course {
   id             String   @id @default(cuid())
   organizationId String? // owning tenant (backfilled; always set for new courses)
   instructorId   String? // assigned by the org admin; null = unassigned
+  /// Set on a *batch*: the program (parent Course) it's a scheduled instance of.
+  /// null = this row is itself a program. A program's content (syllabus,
+  /// assessment questions, assignments, documents) is snapshotted into each
+  /// batch at creation; the batch then owns its own schedule + roster + runtime.
+  parentCourseId String?
   title          String
   description    String?  @db.Text
   posterUrl      String?
@@ -182,13 +203,20 @@ model Course {
   timezone          String? // IANA zone or short label shown to students (e.g. "Africa/Lagos" / "WAT")
   /// Bumped whenever a schedule field changes; drives "your reminder is stale".
   scheduleUpdatedAt DateTime?
+  /// Release the class-end quiz to students the moment class ends (default).
+  /// Off = it's held until the instructor releases it. Set by the instructor in
+  /// the Assessments tool. Inherited by batches at creation (snapshot).
+  instantClassAssessment Boolean @default(true)
 
   organization        Organization?        @relation(fields: [organizationId], references: [id])
   instructor          User?                @relation("instructor", fields: [instructorId], references: [id])
+  parentCourse        Course?              @relation("ProgramBatches", fields: [parentCourseId], references: [id])
+  batches             Course[]             @relation("ProgramBatches")
   sections            Section[]
   enrollments         Enrollment[]
   invites             Invite[]
   sessions            LiveSession[]
+  sessionReminders    SessionReminder[]
   points              PointsLedger[]
   certificates        Certificate[]
   assignments         Assignment[]
@@ -205,6 +233,7 @@ model Course {
 
   @@index([instructorId])
   @@index([organizationId])
+  @@index([parentCourseId])
 }
 
 model Section {
@@ -351,6 +380,20 @@ model Attendance {
 
   @@unique([sessionId, studentId])
   @@index([studentId])
+}
+
+/// One row per (course, meeting day) the pre-class reminder cron has emailed —
+/// the dedupe key so a class occurrence is never reminded twice. `dateKey` is
+/// the occurrence's local calendar day in the course tz ("YYYY-MM-DD").
+model SessionReminder {
+  id       String   @id @default(cuid())
+  courseId String
+  dateKey  String
+  sentAt   DateTime @default(now())
+
+  course Course @relation(fields: [courseId], references: [id])
+
+  @@unique([courseId, dateKey])
 }
 
 model ChatMessage {
@@ -525,6 +568,9 @@ model Assessment {
   sectionId   String? // topic the ended session covered, if any
   /// Frozen string[] of AssessmentQuestion ids, in presentation order.
   questionIds Json
+  /// Visible/gated to students. Set from Course.instantClassAssessment when the
+  /// quiz materialises; a held quiz (false) is released later by the instructor.
+  released    Boolean  @default(true)
   createdAt   DateTime @default(now())
 
   course   Course              @relation(fields: [courseId], references: [id])
@@ -735,6 +781,13 @@ enum CodingAssignmentStatus {
   CLOSED
 }
 
+/// Whether a coding task runs in a live session (LIVE) or is set against the
+/// next class as homework (ASSIGNMENT). Drives launch + broadcast behaviour.
+enum CodingAssignmentKind {
+  LIVE
+  ASSIGNMENT
+}
+
 /// A submission's place in the review pipeline (no test/sandbox stages).
 enum CodingSubmissionStatus {
   SUBMITTED // received, awaiting review
@@ -780,6 +833,8 @@ model CodingAssignment {
   /// Optional live session this task was launched in ("Practice now").
   sessionId        String?
   createdById      String
+  /// Live task (runs in a session) vs assignment (homework for the next class).
+  kind             CodingAssignmentKind   @default(ASSIGNMENT)
   title            String
   description      String?                @db.Text
   language         String? // e.g. "typescript"
@@ -947,4 +1002,69 @@ model CodingFeedback {
   author     User             @relation("codingFeedbackAuthor", fields: [authorId], references: [id])
 
   @@index([submissionId])
+}
+
+// ===========================================================================
+// Platform admin: audit trail + AI-model usage tracking
+// ===========================================================================
+
+/// Immutable audit trail of security- and admin-relevant actions. Actor/org are
+/// stored as denormalized snapshots (id + email) rather than FK relations, so a
+/// row survives the user/org being deleted and can never be silently rewritten.
+model AuditLog {
+  id         String   @id @default(cuid())
+  at         DateTime @default(now())
+  // Who did it (null = system/anonymous, e.g. a failed login for an unknown email).
+  actorId    String?
+  actorEmail String?
+  actorRole  String?
+  // Where it happened (the actor's tenant, when applicable).
+  orgId      String?
+  // What happened — a stable dotted slug, e.g. "auth.login.success",
+  // "admin.user.status.changed" (see AuditAction constants in audit.service).
+  action     String
+  // What it acted on.
+  targetType String?
+  targetId   String?
+  // Free-form context (before/after values, reason, etc.). MySQL JSON.
+  metadata   Json?
+  ip         String?
+  userAgent  String?  @db.Text
+
+  @@index([at])
+  @@index([action, at])
+  @@index([actorId, at])
+  @@index([orgId, at])
+  @@index([targetType, targetId])
+}
+
+enum AiUsageFeature {
+  CODING_REVIEW
+  ASSESSMENT_DRAFT
+}
+
+/// One row per AI model call, with token counts and an estimated USD cost, for
+/// the admin usage dashboard. Decoupled snapshots (no FK relations) like AuditLog.
+model AiUsage {
+  id           String         @id @default(cuid())
+  at           DateTime       @default(now())
+  feature      AiUsageFeature
+  provider     String // e.g. "google"
+  model        String // e.g. "gemini-flash-lite-latest"
+  orgId        String?
+  userId       String?
+  promptTokens Int            @default(0)
+  outputTokens Int            @default(0)
+  totalTokens  Int            @default(0)
+  // Estimated cost in USD micro-units? No — store as a Decimal for accuracy.
+  estCostUsd   Decimal        @default(0) @db.Decimal(12, 6)
+  // Optional pointer to the thing reviewed/generated (e.g. a submission id).
+  refId        String?
+  // "ok" | "error" — a failed/again-billed call still records what it cost.
+  status       String         @default("ok")
+
+  @@index([at])
+  @@index([feature, at])
+  @@index([model, at])
+  @@index([orgId, at])
 }

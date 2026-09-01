@@ -233,6 +233,7 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
       camera: { x: number; y: number; z: number };
       cursor: { x: number; y: number } | null;
       page?: string;
+      bounds?: { x: number; y: number; w: number; h: number };
     },
   ) {
     if (!this.inRoom(client, p.sessionId)) return;
@@ -242,6 +243,7 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
       camera: p.camera,
       cursor: p.cursor,
       page: p.page,
+      bounds: p.bounds,
     });
   }
 

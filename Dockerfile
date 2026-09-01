@@ -19,6 +19,12 @@ RUN apt-get update \
 RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+# Raise Node's heap ceiling for the build. On small hosts (e.g. a 1 GB VPS)
+# Node auto-tunes max-old-space low (~512 MB) and `nest build` OOMs with
+# "Reached heap limit"; this lets it use available RAM + swap. Build stage only
+# (the runner is a fresh FROM, so production runtime is unaffected). Mirrors the
+# same line in livetich-web's Dockerfile.
+ENV NODE_OPTIONS="--max-old-space-size=2048"
 RUN pnpm prisma generate && pnpm build
 
 # ---- runner: dist + node_modules (keeps the prisma CLI for migrate deploy

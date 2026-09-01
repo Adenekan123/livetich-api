@@ -104,13 +104,18 @@ export class QuizService {
     if (!courseId) throw new NotFoundException('Question not found');
     await this.courses.assertCanManageCourse(user, courseId);
 
-    await this.prisma.quizQuestion.delete({ where: { id: questionId } });
-    const remaining = await this.prisma.quizQuestion.count({
-      where: { quizId: question.quiz.id },
+    // A question that ran in a live round has QuizAnswer rows (FK Restrict), so
+    // clear those first, then the question, then the quiz if it's now empty.
+    await this.prisma.$transaction(async (tx) => {
+      await tx.quizAnswer.deleteMany({ where: { questionId } });
+      await tx.quizQuestion.delete({ where: { id: questionId } });
+      const remaining = await tx.quizQuestion.count({
+        where: { quizId: question.quiz.id },
+      });
+      if (remaining === 0) {
+        await tx.quiz.delete({ where: { id: question.quiz.id } });
+      }
     });
-    if (remaining === 0) {
-      await this.prisma.quiz.delete({ where: { id: question.quiz.id } });
-    }
     return { ok: true };
   }
 

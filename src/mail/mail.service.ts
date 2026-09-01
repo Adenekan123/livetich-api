@@ -84,6 +84,59 @@ export class MailService {
     await this.send(to, subject, html, `schedule-change notice for ${to}: ${url}`);
   }
 
+  /**
+   * Security tripwire — emails the operator when a sensitive platform event
+   * fires (a new super-admin granted, an impersonation started). Best-effort.
+   */
+  async sendSecurityAlert(
+    to: string,
+    title: string,
+    lines: string[],
+  ): Promise<void> {
+    const rows = lines
+      .map(
+        (l) =>
+          `<p style="color:#404040;margin:4px 0;font-size:14px">${escapeHtml(l)}</p>`,
+      )
+      .join('');
+    const html = `
+      <div style="font-family:system-ui,sans-serif;max-width:520px;margin:0 auto">
+        <p style="color:#b91c1c;font-weight:700;font-size:12px;letter-spacing:1px;
+        text-transform:uppercase;margin:0 0 8px">Livetich security alert</p>
+        <h2 style="color:#0a0a0a;margin:0 0 12px">${escapeHtml(title)}</h2>
+        ${rows}
+        <p style="color:#737373;font-size:13px;margin-top:20px">If this wasn't you,
+        treat the acting account as compromised: revoke its access and rotate
+        credentials immediately.</p>
+      </div>`;
+    await this.send(to, `[Livetich security] ${title}`, html, `security alert → ${to}: ${title}`);
+  }
+
+  /** Nudge a student that their class starts soon. */
+  async sendClassReminder(
+    to: string,
+    name: string,
+    courseTitle: string,
+    whenLabel: string,
+    url: string,
+  ): Promise<void> {
+    const subject = `Starting soon — ${courseTitle}`;
+    const html = `
+      <div style="font-family:system-ui,sans-serif;max-width:480px;margin:0 auto">
+        <p style="color:#16a34a;font-weight:700;font-size:12px;letter-spacing:1px;
+        text-transform:uppercase;margin:0 0 8px">Class starting soon</p>
+        <h2 style="color:#0a0a0a;margin:0 0 12px">${escapeHtml(courseTitle)}</h2>
+        <p style="color:#404040">Hi ${escapeHtml(name)}, your class starts
+        <strong>${escapeHtml(whenLabel)}</strong>. Join a few minutes early so
+        you don't miss the start.</p>
+        <p style="margin:24px 0">
+          <a href="${url}" style="background:#0a0a0a;color:#fff;padding:12px 20px;
+          border-radius:9999px;text-decoration:none;font-weight:600">Go to the class</a>
+        </p>
+      </div>`;
+    await this.send(to, subject, html, `class reminder → ${to}: ${courseTitle} (${whenLabel})`);
+  }
+
   private async send(
     to: string,
     subject: string,
