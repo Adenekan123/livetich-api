@@ -105,6 +105,13 @@ export class CoursesController {
     return this.courses.createBatch(user, id, dto);
   }
 
+  /** Danger zone: permanently delete a program (or batch) and all its data. */
+  @Delete(':id')
+  @Roles(Role.ORG_ADMIN)
+  remove(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.courses.deleteCourse(user, id);
+  }
+
   @Patch(':id/instructor')
   @Roles(Role.ORG_ADMIN)
   assignInstructor(

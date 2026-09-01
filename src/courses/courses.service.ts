@@ -257,6 +257,95 @@ export class CoursesService {
   }
 
   /**
+   * Hard-delete a program (or batch) and everything under it — a destructive,
+   * admin-only action confirmed in the UI by retyping the title. Children are
+   * removed in dependency order in one transaction; the relations that already
+   * cascade (coding tasks, assessment attempts/responses, group members) are
+   * left to the DB. A program that still has batches is refused so the admin
+   * makes that call per batch first.
+   */
+  async deleteCourse(user: JwtPayload, courseId: string) {
+    const orgId = this.orgOf(user);
+    const course = await this.prisma.course.findUnique({
+      where: { id: courseId },
+      select: {
+        id: true,
+        organizationId: true,
+        _count: { select: { batches: true } },
+      },
+    });
+    if (!course || course.organizationId !== orgId) {
+      throw new NotFoundException('Course not found');
+    }
+    if (course._count.batches > 0) {
+      throw new BadRequestException(
+        'This program has batches. Delete its batches first, then delete the program.',
+      );
+    }
+
+    const c = courseId;
+    await this.prisma.$transaction(async (tx) => {
+      // Coding: requirements, rubric, submissions (+files/reviews/feedback) all
+      // cascade from the assignment.
+      await tx.codingAssignment.deleteMany({ where: { courseId: c } });
+
+      // Exams: answers → attempts → questions → exam (no cascades).
+      await tx.examAnswer.deleteMany({
+        where: { attempt: { exam: { courseId: c } } },
+      });
+      await tx.examAttempt.deleteMany({ where: { exam: { courseId: c } } });
+      await tx.examQuestion.deleteMany({ where: { exam: { courseId: c } } });
+      await tx.exam.deleteMany({ where: { courseId: c } });
+
+      // Remediation assignments reference assessment attempts (no cascade), so
+      // clear them before the assessments cascade those attempts away. They're
+      // always assigned from this course's own tasks, so scoping by task covers
+      // every attempt this course could delete.
+      await tx.assignedRemediation.deleteMany({
+        where: { task: { courseId: c } },
+      });
+      // Assessments cascade their attempts → responses.
+      await tx.assessment.deleteMany({ where: { courseId: c } });
+      await tx.remediationTask.deleteMany({ where: { courseId: c } });
+      await tx.assessmentQuestion.deleteMany({ where: { courseId: c } });
+
+      // Quizzes (course bank + session rounds): answers → questions → quiz.
+      const quizWhere: Prisma.QuizWhereInput = {
+        OR: [{ courseId: c }, { session: { courseId: c } }],
+      };
+      await tx.quizAnswer.deleteMany({ where: { question: { quiz: quizWhere } } });
+      await tx.quizQuestion.deleteMany({ where: { quiz: quizWhere } });
+      await tx.quiz.deleteMany({ where: quizWhere });
+
+      // Assignments: submissions → assignment.
+      await tx.submission.deleteMany({ where: { assignment: { courseId: c } } });
+      await tx.assignment.deleteMany({ where: { courseId: c } });
+
+      // Groups cascade their members.
+      await tx.studentGroup.deleteMany({ where: { courseId: c } });
+
+      await tx.hifzEntry.deleteMany({ where: { courseId: c } });
+      await tx.hifzTarget.deleteMany({ where: { courseId: c } });
+
+      // Session-scoped rows before the sessions themselves.
+      await tx.attendance.deleteMany({ where: { session: { courseId: c } } });
+      await tx.chatMessage.deleteMany({ where: { session: { courseId: c } } });
+
+      await tx.pointsLedger.deleteMany({ where: { courseId: c } });
+      await tx.certificate.deleteMany({ where: { courseId: c } });
+      await tx.courseDocument.deleteMany({ where: { courseId: c } });
+      await tx.enrollment.deleteMany({ where: { courseId: c } });
+      await tx.sessionReminder.deleteMany({ where: { courseId: c } });
+      await tx.invite.deleteMany({ where: { courseId: c } });
+      await tx.section.deleteMany({ where: { courseId: c } });
+      await tx.liveSession.deleteMany({ where: { courseId: c } });
+
+      await tx.course.delete({ where: { id: c } });
+    });
+    return { ok: true };
+  }
+
+  /**
    * Company-scoped catalog. Students & admins see every course in their org;
    * instructors see only the courses assigned to them. Each row carries a
    * light session summary (live now / next scheduled) for the cohort cards.

@@ -44,9 +44,6 @@ interface SocketData {
   /** An org admin who joined in teach-mode (solo teacher): treated as the
    *  session's host for the life of this socket rather than a shadow observer. */
   teaching?: boolean;
-  /** Org pref stashed at join: a student may hold the mic only while their hand
-   *  is raised (grant blocked without it; lowering the hand auto-revokes). */
-  micRequiresRaisedHand?: boolean;
 }
 
 type RoomServer = Server<
@@ -172,20 +169,13 @@ export class RoomGateway
       where: { id: p.sessionId },
       include: {
         course: {
-          select: {
-            id: true,
-            instructorId: true,
-            organizationId: true,
-            organization: { select: { micRequiresRaisedHand: true } },
-          },
+          select: { id: true, instructorId: true, organizationId: true },
         },
       },
     });
     if (!session || session.status === SessionStatus.ENDED) {
       return this.fail(client, 'NOT_JOINABLE', 'Session not found or ended');
     }
-    client.data.micRequiresRaisedHand =
-      session.course.organization?.micRequiresRaisedHand ?? false;
 
     // Admins shadow-observe silently — unless they entered in teach-mode, where
     // a solo-teacher admin joins visibly as the session host. Everyone else must
@@ -490,7 +480,7 @@ export class RoomGateway
     const userId = client.data.user.sub;
     await this.state.lowerHand(p.sessionId, userId);
     // Org pref: the mic is tied to the raised hand — lowering it drops the mic.
-    if (client.data.micRequiresRaisedHand) {
+    if (await this.micNeedsHand(p.sessionId)) {
       const speakers = await this.state.listSpeakers(p.sessionId);
       if (speakers.includes(userId)) {
         await this.state.revokeMic(p.sessionId, userId);
@@ -747,7 +737,9 @@ export class RoomGateway
   ) {
     if (!(await this.isOwner(client, p.sessionId))) return;
     // Org pref: a student can only be granted the mic while their hand is up.
-    if (client.data.micRequiresRaisedHand) {
+    // Read fresh (not stashed) so an admin toggling it mid-class takes effect
+    // immediately, without anyone rejoining.
+    if (await this.micNeedsHand(p.sessionId)) {
       const hands = await this.state.listHands(p.sessionId);
       if (!hands.some((u) => u.userId === p.userId)) {
         return this.fail(
@@ -856,6 +848,20 @@ export class RoomGateway
     if (client.rooms.has(sessionId)) return true;
     this.fail(client, 'NOT_IN_ROOM', 'Join the room first');
     return false;
+  }
+
+  /** Whether this session's org requires a raised hand before the mic — read
+   *  fresh so an admin's toggle applies to a class already in progress. */
+  private async micNeedsHand(sessionId: string): Promise<boolean> {
+    const session = await this.prisma.liveSession.findUnique({
+      where: { id: sessionId },
+      select: {
+        course: {
+          select: { organization: { select: { micRequiresRaisedHand: true } } },
+        },
+      },
+    });
+    return session?.course.organization?.micRequiresRaisedHand ?? false;
   }
 
   private async isOwner(client: RoomSocket, sessionId: string) {
