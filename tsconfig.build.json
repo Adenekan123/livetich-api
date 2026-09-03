@@ -4,7 +4,11 @@
     // Pin the emit root to src. Without this, a stray .ts file outside src (e.g.
     // scripts/) shifts tsc's inferred rootDir to the project root, emitting
     // dist/src/main.js instead of dist/main.js and breaking `node dist/main.js`.
-    "rootDir": "./src"
+    "rootDir": "./src",
+    // Keep the incremental cache inside dist so nest's deleteOutDir wipes it
+    // together with the emit. With it at the project root it survives the wipe,
+    // tsc reports "Found 0 errors" and emits nothing, and dist/main.js is missing.
+    "tsBuildInfoFile": "./dist/tsconfig.build.tsbuildinfo"
   },
   "exclude": ["node_modules", "test", "dist", "scripts", "**/*spec.ts"]
 }

@@ -46,6 +46,7 @@ export class RemindersService {
         durationWeeks: true,
         meetingDays: true,
         meetingTime: true,
+        meetingTimesByDay: true,
         timezone: true,
         organization: { select: { reminderLeadMinutes: true } },
         enrollments: {
@@ -61,6 +62,7 @@ export class RemindersService {
         durationWeeks: course.durationWeeks,
         meetingDays: course.meetingDays,
         meetingTime: course.meetingTime,
+        meetingTimesByDay: course.meetingTimesByDay,
         timezone: course.timezone,
       });
       const next = window.next;

@@ -23,6 +23,7 @@ const COURSE_SCHEDULE_SELECT = {
   durationWeeks: true,
   meetingDays: true,
   meetingTime: true,
+  meetingTimesByDay: true,
   timezone: true,
 } as const;
 
@@ -85,6 +86,7 @@ export class SessionsService {
             durationWeeks: true,
             meetingDays: true,
             meetingTime: true,
+            meetingTimesByDay: true,
             timezone: true,
             instructor: { select: { id: true, name: true } },
             _count: { select: { enrollments: true } },

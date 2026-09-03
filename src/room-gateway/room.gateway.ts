@@ -146,11 +146,32 @@ export class RoomGateway
     const user = client.data.user;
     if (!user) return;
     for (const sessionId of client.data.sessionIds ?? []) {
+      // Presence + hands are keyed by userId, so a stale socket must not clear
+      // them if the same user still has another live socket in the room — the
+      // reconnect case (a fresh socket re-joined before this one's disconnect
+      // fired) and the second-tab case. Otherwise the departing socket would
+      // erase the presence the new socket just added, and the instructor (or a
+      // student) would vanish for everyone — the "will join soon" that never
+      // clears. Only the last socket out actually removes the entry.
+      if (await this.userStillInRoom(sessionId, user.sub, client.id)) continue;
       await this.state.removePresence(sessionId, user.sub);
       await this.state.lowerHand(sessionId, user.sub);
       await this.broadcastPresence(sessionId);
       await this.broadcastHands(sessionId);
     }
+  }
+
+  /** True if `userId` has a live socket (other than `exceptId`) still joined to
+   *  the room — used so a reconnect or a second tab keeps the user present. */
+  private async userStillInRoom(
+    sessionId: string,
+    userId: string,
+    exceptId: string,
+  ): Promise<boolean> {
+    const sockets = await this.server.in(sessionId).fetchSockets();
+    return sockets.some(
+      (s) => s.id !== exceptId && s.data?.user?.sub === userId,
+    );
   }
 
   // ---------- Room membership ----------
