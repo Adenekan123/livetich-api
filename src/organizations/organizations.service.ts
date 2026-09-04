@@ -20,6 +20,7 @@ const SETTINGS_SELECT = {
   micRequiresRaisedHand: true,
   preClassReminder: true,
   reminderLeadMinutes: true,
+  inviteLinkExpiryDays: true,
 } as const;
 
 /** Public brand kit fields — safe to expose on the join page. */
@@ -66,9 +67,18 @@ export class OrganizationsService {
   }
 
   updateSettings(orgId: string, dto: UpdateOrgSettingsDto) {
+    const { inviteLinkExpiryDays, ...rest } = dto;
     return this.prisma.organization.update({
       where: { id: orgId },
-      data: dto,
+      data: {
+        ...rest,
+        // 0 (or omitted-as-0 from the "Never" option) means links never expire →
+        // stored as null; a positive day count is stored as-is.
+        ...(inviteLinkExpiryDays !== undefined && {
+          inviteLinkExpiryDays:
+            inviteLinkExpiryDays > 0 ? inviteLinkExpiryDays : null,
+        }),
+      },
       select: SETTINGS_SELECT,
     });
   }
@@ -85,6 +95,19 @@ export class OrganizationsService {
       });
       if (!course) throw new NotFoundException('Program not found');
     }
+    // Explicit per-link expiry wins; otherwise fall back to the org's default
+    // invite-link lifetime (set in class preferences). Null = never expires.
+    let expiresAt = dto.expiresAt ? new Date(dto.expiresAt) : null;
+    if (!expiresAt) {
+      const org = await this.prisma.organization.findUnique({
+        where: { id: orgId },
+        select: { inviteLinkExpiryDays: true },
+      });
+      const days = org?.inviteLinkExpiryDays ?? 0;
+      if (days > 0) {
+        expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+      }
+    }
     return this.prisma.invite.create({
       data: {
         organizationId: orgId,
@@ -93,7 +116,7 @@ export class OrganizationsService {
         courseId: dto.courseId,
         label: dto.label,
         maxUses: dto.maxUses,
-        expiresAt: dto.expiresAt ? new Date(dto.expiresAt) : null,
+        expiresAt,
         token: randomBytes(16).toString('hex'),
       },
     });

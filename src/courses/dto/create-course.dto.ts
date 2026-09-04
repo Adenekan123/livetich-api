@@ -4,6 +4,7 @@ import {
   IsInt,
   IsISO8601,
   IsIn,
+  IsObject,
   IsOptional,
   IsString,
   Matches,
@@ -62,12 +63,22 @@ export class CreateCourseDto {
   @Max(6, { each: true })
   meetingDays?: number[];
 
-  /** Local start time, 24h "HH:mm". */
+  /** General/default local start time, 24h "HH:mm". */
   @IsOptional()
   @Matches(/^([01]\d|2[0-3]):[0-5]\d$/, {
     message: 'meetingTime must be "HH:mm" (24h)',
   })
   meetingTime?: string;
+
+  /**
+   * Optional per-day start times: a map of day index ("0"=Sun … "6"=Sat) to a
+   * 24h "HH:mm" string. A day present here starts at its own time; days omitted
+   * use meetingTime. The service sanitizes keys/values, so only well-formed
+   * entries are stored. Send `{}` to clear all overrides.
+   */
+  @IsOptional()
+  @IsObject()
+  meetingTimesByDay?: Record<string, string>;
 
   @IsOptional()
   @IsString()

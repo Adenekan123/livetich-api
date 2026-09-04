@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import {
   ConnectedSocket,
@@ -56,6 +57,8 @@ type BoardSocket = Socket<
 export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server!: BoardServer;
+
+  private readonly logger = new Logger(BoardGateway.name);
 
   /** Sessions where the instructor has opened the board for students to draw. */
   private readonly writable = new Set<string>();
@@ -213,12 +216,32 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return this.fail(client, 'FORBIDDEN', 'The board is read-only');
     }
     const update = this.toBytes(p.update);
-    if (!update?.length) return;
-    this.docs.applyUpdate(p.sessionId, update);
+    if (!update?.length) {
+      // A dropped update = students silently stop seeing the instructor's work.
+      // Log the payload shape so a prod runtime that delivers binary in an
+      // unexpected form (see toBytes) is diagnosable instead of silent.
+      this.logger.warn(
+        `board:update dropped for ${p.sessionId}: unrecognized payload ` +
+          `(type=${typeof p.update}, ctor=${
+            (p.update as { constructor?: { name?: string } })?.constructor
+              ?.name ?? 'n/a'
+          })`,
+      );
+      return;
+    }
+    // Relay to peers FIRST, so a server-side doc-apply hiccup can never block
+    // live delivery to students (the actual "chalkboard shows nothing" failure).
     client.to(p.sessionId).emit('board:update', {
       sessionId: p.sessionId,
       update: Buffer.from(update),
     });
+    try {
+      this.docs.applyUpdate(p.sessionId, update);
+    } catch (e) {
+      this.logger.error(
+        `board doc applyUpdate failed for ${p.sessionId}: ${String(e)}`,
+      );
+    }
   }
 
   /** Presenter tools: the instructor's live camera + pointer, relayed to the
@@ -261,9 +284,24 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
   }
 
-  private toBytes(data: BoardBinary): Uint8Array | null {
-    if (data instanceof Uint8Array) return data;
+  private toBytes(data: BoardBinary | unknown): Uint8Array | null {
+    if (data instanceof Uint8Array) return data; // Node Buffer included
     if (data instanceof ArrayBuffer) return new Uint8Array(data);
+    // Any typed-array / DataView view over a buffer.
+    if (ArrayBuffer.isView(data)) {
+      return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    }
+    // A serializer round-trip (e.g. through the Redis adapter, or a prod
+    // transport quirk) can surface binary as a plain byte array or as
+    // `{ type: 'Buffer', data: number[] }`. Recover both rather than drop.
+    if (Array.isArray(data)) return Uint8Array.from(data as number[]);
+    if (
+      data &&
+      typeof data === 'object' &&
+      Array.isArray((data as { data?: unknown }).data)
+    ) {
+      return Uint8Array.from((data as { data: number[] }).data);
+    }
     return null;
   }
 

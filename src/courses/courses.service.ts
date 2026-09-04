@@ -78,6 +78,7 @@ export class CoursesService {
         durationWeeks: true,
         meetingDays: true,
         meetingTime: true,
+        meetingTimesByDay: true,
         timezone: true,
         instantClassAssessment: true,
       },
@@ -420,6 +421,7 @@ export class CoursesService {
         durationWeeks: true,
         meetingDays: true,
         meetingTime: true,
+        meetingTimesByDay: true,
         timezone: true,
         scheduleUpdatedAt: true,
       },
@@ -517,10 +519,12 @@ export class CoursesService {
   private cohortOverrides(dto: {
     startDate?: string | null;
     meetingDays?: number[] | null;
+    meetingTimesByDay?: Record<string, string> | null;
   }) {
     const out: {
       startDate?: Date | null;
       meetingDays?: Prisma.InputJsonValue | typeof Prisma.DbNull;
+      meetingTimesByDay?: Prisma.InputJsonValue | typeof Prisma.DbNull;
     } = {};
     if (dto.startDate !== undefined) {
       out.startDate = dto.startDate === null ? null : new Date(dto.startDate);
@@ -531,7 +535,33 @@ export class CoursesService {
           ? Prisma.DbNull
           : Array.from(new Set(dto.meetingDays)).sort((a, b) => a - b);
     }
+    if (dto.meetingTimesByDay !== undefined) {
+      out.meetingTimesByDay = CoursesService.cleanTimesByDay(
+        dto.meetingTimesByDay,
+      );
+    }
     return out;
+  }
+
+  /**
+   * Sanitize a per-day time map from the client: keep only day keys 0–6 with a
+   * valid "HH:mm" value. An empty result (or null) becomes DbNull so the program
+   * falls back to a single general time. Never trust the raw object — a bad key
+   * or value would otherwise corrupt scheduling for the whole program.
+   */
+  private static cleanTimesByDay(
+    raw: Record<string, string> | null,
+  ): Prisma.InputJsonValue | typeof Prisma.DbNull {
+    if (!raw || typeof raw !== 'object') return Prisma.DbNull;
+    const clean: Record<string, string> = {};
+    for (const [k, v] of Object.entries(raw)) {
+      const day = Number(k);
+      if (!Number.isInteger(day) || day < 0 || day > 6) continue;
+      if (typeof v === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(v)) {
+        clean[String(day)] = v;
+      }
+    }
+    return Object.keys(clean).length ? clean : Prisma.DbNull;
   }
 
   // ---------- Sections ----------
@@ -614,8 +644,9 @@ export class CoursesService {
     const orgId = this.orgOf(user);
     await this.assertOrgCourse(orgId, courseId);
     await this.assertOrgStudent(orgId, studentId);
+    let enrollment;
     try {
-      return await this.prisma.enrollment.create({
+      enrollment = await this.prisma.enrollment.create({
         data: { courseId, studentId },
       });
     } catch (e) {
@@ -627,6 +658,35 @@ export class CoursesService {
       }
       throw e;
     }
+    // Let the student know they've been added — best-effort, never blocks the
+    // enrolment or fails the request if mail is down.
+    await this.notifyEnrolled(courseId, studentId).catch(() => {});
+    return enrollment;
+  }
+
+  /** Email a student that they've been added to a program (best-effort). */
+  private async notifyEnrolled(
+    courseId: string,
+    studentId: string,
+  ): Promise<void> {
+    const [course, student] = await Promise.all([
+      this.prisma.course.findUnique({
+        where: { id: courseId },
+        select: { title: true },
+      }),
+      this.prisma.user.findUnique({
+        where: { id: studentId },
+        select: { name: true, email: true },
+      }),
+    ]);
+    if (!course || !student) return;
+    const base = process.env.WEB_URL ?? 'http://localhost:3001';
+    await this.mail.sendEnrolledInProgram(
+      student.email,
+      student.name,
+      course.title,
+      `${base}/courses/${courseId}`,
+    );
   }
 
   /** Org admin removes a specific student from one of their org's programs. */

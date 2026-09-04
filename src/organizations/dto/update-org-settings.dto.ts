@@ -20,4 +20,11 @@ export class UpdateOrgSettingsDto {
   @Min(5)
   @Max(1440)
   reminderLeadMinutes?: number;
+
+  /** Default lifetime for new invite links, in days (0 = never expire, max 1yr). */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(365)
+  inviteLinkExpiryDays?: number;
 }

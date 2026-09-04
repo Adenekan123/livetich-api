@@ -137,6 +137,30 @@ export class MailService {
     await this.send(to, subject, html, `class reminder → ${to}: ${courseTitle} (${whenLabel})`);
   }
 
+  /** Tell a student they've been added to a program. */
+  async sendEnrolledInProgram(
+    to: string,
+    name: string,
+    courseTitle: string,
+    url: string,
+  ): Promise<void> {
+    const subject = `You've been added to ${courseTitle}`;
+    const html = `
+      <div style="font-family:system-ui,sans-serif;max-width:480px;margin:0 auto">
+        <p style="color:#16a34a;font-weight:700;font-size:12px;letter-spacing:1px;
+        text-transform:uppercase;margin:0 0 8px">New program</p>
+        <h2 style="color:#0a0a0a;margin:0 0 12px">${escapeHtml(courseTitle)}</h2>
+        <p style="color:#404040">Hi ${escapeHtml(name)}, you've been enrolled in
+        <strong>${escapeHtml(courseTitle)}</strong> on livetich. Open the program
+        to see the schedule, curriculum, and join live classes on meeting days.</p>
+        <p style="margin:24px 0">
+          <a href="${url}" style="background:#0a0a0a;color:#fff;padding:12px 20px;
+          border-radius:9999px;text-decoration:none;font-weight:600">View the program</a>
+        </p>
+      </div>`;
+    await this.send(to, subject, html, `enrolment notice → ${to}: ${courseTitle}`);
+  }
+
   private async send(
     to: string,
     subject: string,
