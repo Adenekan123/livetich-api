@@ -309,6 +309,58 @@ export class AuthService {
   }
 
   /**
+   * The workspaces this identity can currently act in (its active memberships),
+   * for the workspace switcher. One account can belong to several orgs.
+   */
+  async listWorkspaces(userId: string): Promise<
+    { organizationId: string; organizationName: string; role: Role }[]
+  > {
+    const memberships = await this.prisma.membership.findMany({
+      where: { userId, status: UserStatus.ACTIVE },
+      include: { organization: { select: { id: true, name: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+    return memberships.map((m) => ({
+      organizationId: m.organizationId,
+      organizationName: m.organization.name,
+      role: m.role,
+    }));
+  }
+
+  /**
+   * Re-mint the session scoped to a different workspace. The caller must hold an
+   * ACTIVE membership there; the new token's organizationId + role become that
+   * workspace's, so every downstream org-scoped query follows the switch.
+   */
+  async switchWorkspace(
+    userId: string,
+    organizationId: string,
+  ): Promise<AuthResult> {
+    const membership = await this.prisma.membership.findUnique({
+      where: { userId_organizationId: { userId, organizationId } },
+    });
+    if (!membership || membership.status !== UserStatus.ACTIVE) {
+      throw new ForbiddenException('You are not a member of that workspace');
+    }
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        emailVerified: true,
+        isSuperAdmin: true,
+      },
+    });
+    if (!user) throw new UnauthorizedException('Account not found');
+    return this.toAuthResult({
+      ...user,
+      role: membership.role,
+      organizationId: membership.organizationId,
+    });
+  }
+
+  /**
    * A short-lived token for realtime clients (Socket.IO + LiveKit). The web
    * hands this to browser JS instead of the 7-day session cookie, so an XSS
    * (if one ever slips past) steals a token that expires in minutes, not days.
