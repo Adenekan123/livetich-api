@@ -166,8 +166,15 @@ export class OrganizationsService {
   }
 
   listMembers(orgId: string, role: Role) {
+    // Multi-workspace: an org's members are its Memberships, not users whose
+    // legacy `organizationId` matches — so a member who joined this workspace on
+    // an existing account (their primary org is elsewhere) still shows here.
     return this.prisma.user.findMany({
-      where: { organizationId: orgId, role },
+      where: {
+        memberships: {
+          some: { organizationId: orgId, role, status: UserStatus.ACTIVE },
+        },
+      },
       select: {
         id: true,
         name: true,
@@ -182,9 +189,9 @@ export class OrganizationsService {
   /** Admin enables/disables a member of their org. Admins and users outside the
    *  org can't be targeted. Disabling ends the member's active session. */
   async setMemberStatus(orgId: string, memberId: string, status: UserStatus) {
-    const member = await this.prisma.user.findFirst({
-      where: { id: memberId, organizationId: orgId },
-      select: { id: true, role: true },
+    const member = await this.prisma.membership.findUnique({
+      where: { userId_organizationId: { userId: memberId, organizationId: orgId } },
+      select: { role: true },
     });
     if (!member) throw new NotFoundException('Member not found in your organization');
     if (member.role === Role.ORG_ADMIN) {
@@ -207,8 +214,9 @@ export class OrganizationsService {
 
     const students = await this.prisma.user.findMany({
       where: {
-        organizationId: orgId,
-        role: Role.STUDENT,
+        memberships: {
+          some: { organizationId: orgId, role: Role.STUDENT, status: UserStatus.ACTIVE },
+        },
         ...(courseId && { enrollments: { some: { courseId } } }),
       },
       select: {
