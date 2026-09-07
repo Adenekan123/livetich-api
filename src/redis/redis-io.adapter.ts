@@ -27,7 +27,15 @@ export class RedisIoAdapter extends IoAdapter {
   }
 
   createIOServer(port: number, options?: ServerOptions) {
-    const server = super.createIOServer(port, options);
+    // The chalkboard ships full Yjs document snapshots as a single binary frame
+    // (board:state on join). A busy board — lots of drawing, an imported PDF —
+    // can exceed socket.io's 1 MB default maxHttpBufferSize, which silently
+    // rejects the frame and leaves that client on a blank board. Give binary
+    // doc traffic real headroom.
+    const server = super.createIOServer(port, {
+      ...options,
+      maxHttpBufferSize: 1e7, // 10 MB
+    });
     if (this.adapterConstructor) server.adapter(this.adapterConstructor);
     return server;
   }
