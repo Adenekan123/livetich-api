@@ -138,8 +138,14 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() p: { sessionId: string; as?: 'teach' },
   ) {
     if (!(await client.data.authReady)) return;
+    // A browser reconnect can reach Socket.IO while its first state packet is
+    // still in flight. Retried joins must replay state instead of returning
+    // silently, otherwise that viewer remains in the room but permanently
+    // misses every update that happened around the reconnect.
+    if (client.data.sessionIds.has(p.sessionId)) {
+      return this.sendState(p.sessionId, client);
+    }
     const user = client.data.user;
-    if (client.data.sessionIds.has(p.sessionId)) return;
 
     const session = await this.prisma.liveSession.findUnique({
       where: { id: p.sessionId },
@@ -183,27 +189,31 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
     await this.docs.retain(p.sessionId);
     await client.join(p.sessionId);
     client.data.sessionIds.add(p.sessionId);
+    this.sendState(p.sessionId, client);
+  }
 
-    const state = this.docs.encodeState(p.sessionId);
+  /** Send the complete board state after every successful (or retried) join. */
+  private sendState(sessionId: string, client: BoardSocket) {
+    const state = this.docs.encodeState(sessionId);
     if (state) {
       client.emit('board:state', {
-        sessionId: p.sessionId,
+        sessionId,
         update: Buffer.from(state),
       });
     }
     // Tell the joiner whether students may currently draw.
     client.emit('board:writable', {
-      sessionId: p.sessionId,
-      open: this.writable.has(p.sessionId),
+      sessionId,
+      open: this.writable.has(sessionId),
     });
     // Replay the presenter's last known view so a client joining during a lull
     // frames to the instructor's view right away instead of waiting for the
     // presenter to move (the "blank until the teacher pans" case). cursor is
     // null — the laser is live-only and a stale one would be misleading.
-    const view = this.lastView.get(p.sessionId);
+    const view = this.lastView.get(sessionId);
     if (view) {
       client.emit('board:presenter', {
-        sessionId: p.sessionId,
+        sessionId,
         camera: view.camera,
         cursor: null,
         page: view.page,
