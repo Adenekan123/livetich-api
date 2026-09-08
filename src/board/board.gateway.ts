@@ -268,7 +268,7 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
     // Relay to peers FIRST, so a server-side doc-apply hiccup can never block
     // live delivery to students (the actual "chalkboard shows nothing" failure).
-    client.to(p.sessionId).emit('board:update', {
+    this.server.to(p.sessionId).emit('board:update', {
       sessionId: p.sessionId,
       update: Buffer.from(update),
     });
@@ -305,7 +305,7 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
       page: p.page,
       bounds: p.bounds,
     });
-    client.to(p.sessionId).emit('board:presenter', {
+    this.server.to(p.sessionId).emit('board:presenter', {
       sessionId: p.sessionId,
       camera: p.camera,
       cursor: p.cursor,
@@ -322,7 +322,7 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (!this.inRoom(client, p.sessionId)) return;
     const update = this.toBytes(p.update);
     if (!update?.length) return;
-    client.to(p.sessionId).emit('board:awareness', {
+    this.server.to(p.sessionId).emit('board:awareness', {
       sessionId: p.sessionId,
       update: Buffer.from(update),
     });
