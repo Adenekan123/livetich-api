@@ -63,6 +63,22 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
   /** Sessions where the instructor has opened the board for students to draw. */
   private readonly writable = new Set<string>();
 
+  /** The presenter's most recent view per session (camera/page/bounds). The
+   *  presenter only broadcasts board:presenter when its view *changes*, so a
+   *  client that joins during a lull (instructor paused, not panning/drawing)
+   *  would otherwise receive no view and sit on a blank/unframed board. We cache
+   *  the last view here and replay it on join so a mid-lull joiner frames to the
+   *  instructor's view immediately. The live laser cursor is deliberately not
+   *  replayed (it's ephemeral) — see onJoin. */
+  private readonly lastView = new Map<
+    string,
+    {
+      camera: { x: number; y: number; z: number };
+      page?: string;
+      bounds?: { x: number; y: number; w: number; h: number };
+    }
+  >();
+
   constructor(
     private readonly jwt: JwtService,
     private readonly prisma: PrismaService,
@@ -106,9 +122,13 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   async handleDisconnect(client: BoardSocket) {
     for (const sessionId of client.data.sessionIds ?? []) {
-      // When the last client leaves, drop the "students may draw" flag too, so
-      // it can't leak into a later class on the same session (or grow forever).
-      if (await this.docs.release(sessionId)) this.writable.delete(sessionId);
+      // When the last client leaves, drop the "students may draw" flag and the
+      // cached presenter view too, so neither leaks into a later class on the
+      // same session (or grows forever).
+      if (await this.docs.release(sessionId)) {
+        this.writable.delete(sessionId);
+        this.lastView.delete(sessionId);
+      }
     }
   }
 
@@ -118,8 +138,14 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() p: { sessionId: string; as?: 'teach' },
   ) {
     if (!(await client.data.authReady)) return;
+    // A browser reconnect can reach Socket.IO while its first state packet is
+    // still in flight. Retried joins must replay state instead of returning
+    // silently, otherwise that viewer remains in the room but permanently
+    // misses every update that happened around the reconnect.
+    if (client.data.sessionIds.has(p.sessionId)) {
+      return this.sendState(p.sessionId, client);
+    }
     const user = client.data.user;
-    if (client.data.sessionIds.has(p.sessionId)) return;
 
     const session = await this.prisma.liveSession.findUnique({
       where: { id: p.sessionId },
@@ -163,19 +189,37 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
     await this.docs.retain(p.sessionId);
     await client.join(p.sessionId);
     client.data.sessionIds.add(p.sessionId);
+    this.sendState(p.sessionId, client);
+  }
 
-    const state = this.docs.encodeState(p.sessionId);
+  /** Send the complete board state after every successful (or retried) join. */
+  private sendState(sessionId: string, client: BoardSocket) {
+    const state = this.docs.encodeState(sessionId);
     if (state) {
       client.emit('board:state', {
-        sessionId: p.sessionId,
+        sessionId,
         update: Buffer.from(state),
       });
     }
     // Tell the joiner whether students may currently draw.
     client.emit('board:writable', {
-      sessionId: p.sessionId,
-      open: this.writable.has(p.sessionId),
+      sessionId,
+      open: this.writable.has(sessionId),
     });
+    // Replay the presenter's last known view so a client joining during a lull
+    // frames to the instructor's view right away instead of waiting for the
+    // presenter to move (the "blank until the teacher pans" case). cursor is
+    // null — the laser is live-only and a stale one would be misleading.
+    const view = this.lastView.get(sessionId);
+    if (view) {
+      client.emit('board:presenter', {
+        sessionId,
+        camera: view.camera,
+        cursor: null,
+        page: view.page,
+        bounds: view.bounds,
+      });
+    }
   }
 
   /** Instructor opens/closes the board for student drawing ("come to the
@@ -201,7 +245,10 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ) {
     if (!client.data.sessionIds.delete(p.sessionId)) return;
     await client.leave(p.sessionId);
-    if (await this.docs.release(p.sessionId)) this.writable.delete(p.sessionId);
+    if (await this.docs.release(p.sessionId)) {
+      this.writable.delete(p.sessionId);
+      this.lastView.delete(p.sessionId);
+    }
   }
 
   @SubscribeMessage('board:update')
@@ -231,6 +278,8 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
     // Relay to peers FIRST, so a server-side doc-apply hiccup can never block
     // live delivery to students (the actual "chalkboard shows nothing" failure).
+    // Do not echo it back to the sender: Yjs already has that local update, and
+    // redundant large freehand packets needlessly compete with student delivery.
     client.to(p.sessionId).emit('board:update', {
       sessionId: p.sessionId,
       update: Buffer.from(update),
@@ -261,7 +310,14 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ) {
     if (!this.inRoom(client, p.sessionId)) return;
     if (!this.canPresent(client)) return;
-    client.to(p.sessionId).emit('board:presenter', {
+    // Remember the latest view so a later joiner can be framed to it on join
+    // (see onJoin). The cursor is not stored — it's live laser position only.
+    this.lastView.set(p.sessionId, {
+      camera: p.camera,
+      page: p.page,
+      bounds: p.bounds,
+    });
+    this.server.to(p.sessionId).emit('board:presenter', {
       sessionId: p.sessionId,
       camera: p.camera,
       cursor: p.cursor,
@@ -278,7 +334,7 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (!this.inRoom(client, p.sessionId)) return;
     const update = this.toBytes(p.update);
     if (!update?.length) return;
-    client.to(p.sessionId).emit('board:awareness', {
+    this.server.to(p.sessionId).emit('board:awareness', {
       sessionId: p.sessionId,
       update: Buffer.from(update),
     });

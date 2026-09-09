@@ -6,11 +6,14 @@ import { AuthService } from './auth.service';
 import { CurrentUser } from './current-user.decorator';
 import { AdminReauthDto } from './dto/admin-reauth.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
+import { CreateWorkspaceDto } from './dto/create-workspace.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
+import { JoinWorkspaceDto } from './dto/join-workspace.dto';
 import { LoginDto } from './dto/login.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { RegisterDto } from './dto/register.dto';
 import { RegisterOrganizationDto } from './dto/register-organization.dto';
+import { SwitchWorkspaceDto } from './dto/switch-workspace.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
 import { AllowUnverified, Public } from './jwt-auth.guard';
 import type { JwtPayload } from './jwt-payload';
@@ -111,6 +114,40 @@ export class AuthController {
   @Get('me')
   me(@CurrentUser() user: JwtPayload) {
     return user;
+  }
+
+  /** Workspaces this account can act in — for the workspace switcher. */
+  @Get('workspaces')
+  workspaces(@CurrentUser() user: JwtPayload) {
+    return this.auth.listWorkspaces(user.sub);
+  }
+
+  /** Switch the active workspace; returns a fresh token scoped to it. */
+  @HttpCode(200)
+  @Post('switch-workspace')
+  switchWorkspace(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: SwitchWorkspaceDto,
+  ) {
+    return this.auth.switchWorkspace(user.sub, dto.organizationId);
+  }
+
+  /** Join another workspace via an invite link, on the current account — no
+   *  second account. Returns a session scoped to the joined workspace. */
+  @HttpCode(200)
+  @Post('join-workspace')
+  joinWorkspace(@CurrentUser() user: JwtPayload, @Body() dto: JoinWorkspaceDto) {
+    return this.auth.joinWorkspace(user.sub, dto.inviteToken);
+  }
+
+  /** Create a new teaching space on the current account (become its admin). */
+  @HttpCode(200)
+  @Post('create-workspace')
+  createWorkspace(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: CreateWorkspaceDto,
+  ) {
+    return this.auth.createWorkspace(user.sub, dto);
   }
 
   /** Short-lived token for realtime clients (see AuthService.mintRealtimeToken).

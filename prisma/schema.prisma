@@ -58,9 +58,9 @@ enum HifzKind {
 
 /// A tenant: the teaching company. Owns its people, courses, and brand kit.
 model Organization {
-  id           String   @id @default(cuid())
+  id           String  @id @default(cuid())
   name         String
-  slug         String   @unique
+  slug         String  @unique
   // ---- Brand kit ----
   logoUrl      String?
   primaryColor String? // hex, e.g. "#0a0a0a" — drives themed accents
@@ -81,12 +81,13 @@ model Organization {
   /// Applied at invite-creation time when no explicit expiry is given.
   inviteLinkExpiryDays   Int?
 
-  createdAt    DateTime @default(now())
+  createdAt DateTime @default(now())
 
-  users      User[]
-  courses    Course[]
-  invites    Invite[]
-  orgPlugins OrgPlugin[]
+  users       User[]
+  memberships Membership[]
+  courses     Course[]
+  invites     Invite[]
+  orgPlugins  OrgPlugin[]
 }
 
 /// An enabled add-on pack for a tenant. The catalog of pluginKeys lives in code
@@ -153,6 +154,11 @@ model User {
   verifyOtpExpiresAt DateTime?
 
   organization             Organization?         @relation(fields: [organizationId], references: [id])
+  // Multi-workspace: one identity can hold memberships in many orgs, each with
+  // its own role + status. The single organizationId/role/status above are the
+  // legacy "primary" membership, kept during the phased migration; reads move to
+  // Membership over Phases 2-5, then those columns are dropped.
+  memberships              Membership[]
   coursesTaught            Course[]              @relation("instructor")
   enrollments              Enrollment[]
   chatMessages             ChatMessage[]
@@ -181,6 +187,30 @@ model User {
   @@index([organizationId])
 }
 
+/**
+ * A user's membership in an organization: their role + access status WITHIN that
+ * org. One identity (User) can hold many memberships, so a student can belong to
+ * several teachers' workspaces and a teacher can also be a student elsewhere —
+ * all on one login, switching the active workspace. Disable/enable is per-org
+ * here (User.status stays as the legacy global flag until Phase 5).
+ */
+model Membership {
+  id             String     @id @default(cuid())
+  userId         String
+  organizationId String
+  role           Role
+  status         UserStatus @default(ACTIVE)
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, organizationId])
+  @@index([userId])
+  @@index([organizationId])
+}
+
 model Course {
   id             String   @id @default(cuid())
   organizationId String? // owning tenant (backfilled; always set for new courses)
@@ -196,24 +226,24 @@ model Course {
   createdAt      DateTime @default(now())
 
   // ---- Cohort program (descriptive; live sessions are still scheduled per occurrence) ----
-  category          String? // e.g. "Software Engineering", "Design", "Business"
-  level             String? // "Beginner" | "Intermediate" | "Advanced"
-  startDate         DateTime? // first day of the cohort
-  durationWeeks     Int? // program length; drives the end date + "N weeks" label
+  category               String? // e.g. "Software Engineering", "Design", "Business"
+  level                  String? // "Beginner" | "Intermediate" | "Advanced"
+  startDate              DateTime? // first day of the cohort
+  durationWeeks          Int? // program length; drives the end date + "N weeks" label
   /// Weekly meeting days as int[] (0=Sun … 6=Sat). MySQL has no array type.
-  meetingDays       Json?
-  meetingTime       String? // general/default local start time, 24h "HH:mm" (e.g. "18:00")
+  meetingDays            Json?
+  meetingTime            String? // general/default local start time, 24h "HH:mm" (e.g. "18:00")
   /// Optional per-day time overrides: JSON map { "0".."6": "HH:mm" }. A meeting
   /// day listed here starts at its own time; other days use meetingTime. Null =
   /// every day uses the general meetingTime.
-  meetingTimesByDay Json?
-  timezone          String? // IANA zone or short label shown to students (e.g. "Africa/Lagos" / "WAT")
+  meetingTimesByDay      Json?
+  timezone               String? // IANA zone or short label shown to students (e.g. "Africa/Lagos" / "WAT")
   /// Bumped whenever a schedule field changes; drives "your reminder is stale".
-  scheduleUpdatedAt DateTime?
+  scheduleUpdatedAt      DateTime?
   /// Release the class-end quiz to students the moment class ends (default).
   /// Off = it's held until the instructor releases it. Set by the instructor in
   /// the Assessments tool. Inherited by batches at creation (snapshot).
-  instantClassAssessment Boolean @default(true)
+  instantClassAssessment Boolean   @default(true)
 
   organization        Organization?        @relation(fields: [organizationId], references: [id])
   instructor          User?                @relation("instructor", fields: [instructorId], references: [id])

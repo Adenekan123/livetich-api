@@ -5,7 +5,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, Role, SessionStatus } from '@prisma/client';
+import { Prisma, Role, SessionStatus, UserStatus } from '@prisma/client';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { PrismaService } from '../prisma/prisma.service';
 import { MailService } from '../mail/mail.service';
@@ -785,21 +785,21 @@ export class CoursesService {
   }
 
   private async assertOrgInstructor(orgId: string, instructorId: string) {
-    const found = await this.prisma.user.findFirst({
-      where: { id: instructorId, organizationId: orgId, role: Role.INSTRUCTOR },
-      select: { id: true },
+    const found = await this.prisma.membership.findUnique({
+      where: { userId_organizationId: { userId: instructorId, organizationId: orgId } },
+      select: { role: true, status: true },
     });
-    if (!found) {
+    if (!found || found.status !== UserStatus.ACTIVE || found.role !== Role.INSTRUCTOR) {
       throw new BadRequestException('Instructor not found in your organization');
     }
   }
 
   private async assertOrgStudent(orgId: string, studentId: string) {
-    const found = await this.prisma.user.findFirst({
-      where: { id: studentId, organizationId: orgId, role: Role.STUDENT },
-      select: { id: true },
+    const found = await this.prisma.membership.findUnique({
+      where: { userId_organizationId: { userId: studentId, organizationId: orgId } },
+      select: { role: true, status: true },
     });
-    if (!found) {
+    if (!found || found.status !== UserStatus.ACTIVE || found.role !== Role.STUDENT) {
       throw new BadRequestException('Student not found in your organization');
     }
   }

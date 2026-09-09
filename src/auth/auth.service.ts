@@ -13,6 +13,7 @@ import { createHash, randomBytes, randomInt } from 'crypto';
 import { MailService } from '../mail/mail.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthCacheService } from './auth-cache.service';
+import { CreateWorkspaceDto } from './dto/create-workspace.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { RegisterOrganizationDto } from './dto/register-organization.dto';
@@ -122,6 +123,16 @@ export class AuthService {
           organizationId: invite!.organizationId,
         },
       });
+      // Multi-workspace source of truth: mirror the join as a Membership so new
+      // accounts are consistent with the model (legacy columns above stay too).
+      await tx.membership.create({
+        data: {
+          userId: created.id,
+          organizationId: invite!.organizationId,
+          role: invite!.role,
+          status: UserStatus.ACTIVE,
+        },
+      });
       await tx.invite.update({
         where: { id: invite!.id },
         data: { uses: { increment: 1 } },
@@ -164,7 +175,7 @@ export class AuthService {
           logoUrl: dto.logoUrl,
         },
       });
-      return tx.user.create({
+      const created = await tx.user.create({
         data: {
           name: dto.name,
           email: dto.email,
@@ -173,6 +184,15 @@ export class AuthService {
           organizationId: org.id,
         },
       });
+      await tx.membership.create({
+        data: {
+          userId: created.id,
+          organizationId: org.id,
+          role: Role.ORG_ADMIN,
+          status: UserStatus.ACTIVE,
+        },
+      });
+      return created;
     });
 
     await this.sendVerificationOtp(user.id);
@@ -306,6 +326,144 @@ export class AuthService {
         emailVerified: user.emailVerified,
       },
     };
+  }
+
+  /**
+   * The workspaces this identity can currently act in (its active memberships),
+   * for the workspace switcher. One account can belong to several orgs.
+   */
+  async listWorkspaces(userId: string): Promise<
+    { organizationId: string; organizationName: string; role: Role }[]
+  > {
+    const memberships = await this.prisma.membership.findMany({
+      where: { userId, status: UserStatus.ACTIVE },
+      include: { organization: { select: { id: true, name: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+    return memberships.map((m) => ({
+      organizationId: m.organizationId,
+      organizationName: m.organization.name,
+      role: m.role,
+    }));
+  }
+
+  /**
+   * Re-mint the session scoped to a different workspace. The caller must hold an
+   * ACTIVE membership there; the new token's organizationId + role become that
+   * workspace's, so every downstream org-scoped query follows the switch.
+   */
+  async switchWorkspace(
+    userId: string,
+    organizationId: string,
+  ): Promise<AuthResult> {
+    const membership = await this.prisma.membership.findUnique({
+      where: { userId_organizationId: { userId, organizationId } },
+    });
+    if (!membership || membership.status !== UserStatus.ACTIVE) {
+      throw new ForbiddenException('You are not a member of that workspace');
+    }
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        emailVerified: true,
+        isSuperAdmin: true,
+      },
+    });
+    if (!user) throw new UnauthorizedException('Account not found');
+    return this.toAuthResult({
+      ...user,
+      role: membership.role,
+      organizationId: membership.organizationId,
+    });
+  }
+
+  /**
+   * An existing, authenticated account joins ANOTHER org via an invite link —
+   * adds a Membership instead of forcing a second account (the core of the
+   * multi-workspace fix). Returns a session scoped to the joined workspace so
+   * the client lands in it. Idempotent: already a member -> just switches in.
+   */
+  async joinWorkspace(userId: string, inviteToken: string): Promise<AuthResult> {
+    const { orgId, role } = await this.prisma.$transaction(async (tx) => {
+      const invite = await tx.invite.findUnique({ where: { token: inviteToken } });
+      this.assertInviteUsable(invite);
+      const organizationId = invite!.organizationId;
+      const existing = await tx.membership.findUnique({
+        where: { userId_organizationId: { userId, organizationId } },
+      });
+      if (existing) return { orgId: organizationId, role: existing.role };
+
+      await tx.membership.create({
+        data: { userId, organizationId, role: invite!.role, status: UserStatus.ACTIVE },
+      });
+      await tx.invite.update({
+        where: { id: invite!.id },
+        data: { uses: { increment: 1 } },
+      });
+      // Course-scoped link: enrol the student / assign the instructor.
+      if (invite!.courseId) {
+        if (invite!.role === Role.STUDENT) {
+          await tx.enrollment.upsert({
+            where: { courseId_studentId: { courseId: invite!.courseId, studentId: userId } },
+            create: { courseId: invite!.courseId, studentId: userId },
+            update: {},
+          });
+        } else if (invite!.role === Role.INSTRUCTOR) {
+          await tx.course.update({
+            where: { id: invite!.courseId },
+            data: { instructorId: userId },
+          });
+        }
+      }
+      return { orgId: organizationId, role: invite!.role };
+    });
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, name: true, email: true, emailVerified: true, isSuperAdmin: true },
+    });
+    if (!user) throw new UnauthorizedException('Account not found');
+    return this.toAuthResult({ ...user, role, organizationId: orgId });
+  }
+
+  /**
+   * An existing, authenticated account creates a NEW teaching space and becomes
+   * its admin — no second account. Returns a session scoped to the new org.
+   */
+  async createWorkspace(
+    userId: string,
+    dto: CreateWorkspaceDto,
+  ): Promise<AuthResult> {
+    const slug = await this.uniqueSlug(dto.organizationName);
+    const orgId = await this.prisma.$transaction(async (tx) => {
+      const org = await tx.organization.create({
+        data: {
+          name: dto.organizationName,
+          slug,
+          tagline: dto.tagline,
+          primaryColor: dto.primaryColor,
+        },
+      });
+      await tx.membership.create({
+        data: {
+          userId,
+          organizationId: org.id,
+          role: Role.ORG_ADMIN,
+          status: UserStatus.ACTIVE,
+        },
+      });
+      return org.id;
+    });
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, name: true, email: true, emailVerified: true, isSuperAdmin: true },
+    });
+    if (!user) throw new UnauthorizedException('Account not found');
+    return this.toAuthResult({ ...user, role: Role.ORG_ADMIN, organizationId: orgId });
   }
 
   /**

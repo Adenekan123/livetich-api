@@ -33,12 +33,10 @@ export interface JoinWindow {
   current: Occurrence | null;
   /** Soonest meeting strictly after `now` (for the "next session" label). */
   next: Occurrence | null;
-  /** True only on the scheduled day, from `meetingTime` onward. */
+  /** True for the whole scheduled local calendar day. */
   joinableNow: boolean;
 }
 
-/** Students may enter a few minutes before the wall-clock start. */
-const EARLY_JOIN_MS = 10 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** Local wall-clock parts of an instant in `tz`. */
@@ -159,8 +157,8 @@ export function listOccurrences(schedule: CourseSchedule): Occurrence[] {
 
 /**
  * Resolve the join window for a course at `now`. `current` is today's meeting;
- * `joinableNow` gates the Join button to the scheduled day, from the meeting
- * time (minus a short early-entry grace) onward.
+ * `joinableNow` covers its full local calendar day. Meeting times still drive
+ * calendars, reminders, and display, but never prevent a same-day retake.
  */
 export function resolveJoinWindow(
   schedule: CourseSchedule,
@@ -177,8 +175,7 @@ export function resolveJoinWindow(
 
   const current = occurrences.find((o) => o.dateKey === todayKey) ?? null;
   const next = occurrences.find((o) => o.scheduledAt.getTime() > now.getTime()) ?? null;
-  const joinableNow =
-    current !== null && now.getTime() >= current.scheduledAt.getTime() - EARLY_JOIN_MS;
+  const joinableNow = current !== null;
 
   return { current, next, joinableNow };
 }
