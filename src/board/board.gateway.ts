@@ -278,7 +278,9 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
     // Relay to peers FIRST, so a server-side doc-apply hiccup can never block
     // live delivery to students (the actual "chalkboard shows nothing" failure).
-    this.server.to(p.sessionId).emit('board:update', {
+    // Do not echo it back to the sender: Yjs already has that local update, and
+    // redundant large freehand packets needlessly compete with student delivery.
+    client.to(p.sessionId).emit('board:update', {
       sessionId: p.sessionId,
       update: Buffer.from(update),
     });
