@@ -56,6 +56,10 @@ export class BoardDocService implements OnModuleDestroy {
     entry.clients -= 1;
     if (entry.clients > 0) return false;
     await this.flush(sessionId, entry);
+    // A participant can rejoin while the last-client snapshot flush is awaiting
+    // object storage. In that window retain() revives this entry; do not destroy
+    // the active document after the flush completes.
+    if (entry.clients > 0) return false;
     entry.doc.destroy();
     this.boards.delete(sessionId);
     return true;
