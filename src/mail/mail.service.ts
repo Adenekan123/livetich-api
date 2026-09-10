@@ -161,6 +161,39 @@ export class MailService {
     await this.send(to, subject, html, `enrolment notice → ${to}: ${courseTitle}`);
   }
 
+  async sendAssignmentPosted(
+    to: string,
+    name: string,
+    courseTitle: string,
+    assignmentTitle: string,
+    dueLabel: string | null,
+    url: string,
+  ): Promise<void> {
+    const subject = `New assignment in ${courseTitle}: ${assignmentTitle}`;
+    const due = dueLabel
+      ? `<p style="color:#404040;margin:0 0 4px"><strong>Due:</strong> ${escapeHtml(dueLabel)}</p>`
+      : '';
+    const html = `
+      <div style="font-family:system-ui,sans-serif;max-width:480px;margin:0 auto">
+        <p style="color:#16a34a;font-weight:700;font-size:12px;letter-spacing:1px;
+        text-transform:uppercase;margin:0 0 8px">New assignment</p>
+        <h2 style="color:#0a0a0a;margin:0 0 12px">${escapeHtml(assignmentTitle)}</h2>
+        <p style="color:#404040">Hi ${escapeHtml(name)}, new coursework has been
+        posted in <strong>${escapeHtml(courseTitle)}</strong>.</p>
+        ${due}
+        <p style="margin:24px 0">
+          <a href="${url}" style="background:#0a0a0a;color:#fff;padding:12px 20px;
+          border-radius:9999px;text-decoration:none;font-weight:600">Open the assignment</a>
+        </p>
+      </div>`;
+    await this.send(
+      to,
+      subject,
+      html,
+      `assignment notice -> ${to}: ${courseTitle} / ${assignmentTitle}`,
+    );
+  }
+
   private async send(
     to: string,
     subject: string,

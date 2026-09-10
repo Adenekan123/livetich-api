@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { PointsReason, Prisma, Role } from '@prisma/client';
@@ -16,6 +17,7 @@ import { CreateAssignmentDto } from './dto/create-assignment.dto';
 import { GradeSubmissionDto } from './dto/grade-submission.dto';
 import { SubmitAssignmentDto } from './dto/submit-assignment.dto';
 import { RoomBroadcaster } from '../realtime/room-broadcaster';
+import { MailService } from '../mail/mail.service';
 
 /** What students may attach: recitation audio, plus images and PDFs. */
 const ALLOWED_UPLOAD_PREFIXES = ['audio/', 'image/'];
@@ -24,12 +26,15 @@ const MAX_UPLOAD_BYTES = 30 * 1024 * 1024; // 30 MB
 
 @Injectable()
 export class AssignmentsService {
+  private readonly logger = new Logger(AssignmentsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly courses: CoursesService,
     private readonly points: PointsService,
     @Inject(OBJECT_STORAGE) private readonly storage: ObjectStorage,
     private readonly broadcaster: RoomBroadcaster,
+    private readonly mail: MailService,
   ) {}
 
   /** Instructor (assigned) or org admin creates coursework. */
@@ -56,7 +61,7 @@ export class AssignmentsService {
       });
       if (!session) throw new NotFoundException('Session not found in course');
     }
-    return this.prisma.assignment.create({
+    const assignment = await this.prisma.assignment.create({
       data: {
         courseId,
         sectionId: dto.sectionId,
@@ -69,6 +74,69 @@ export class AssignmentsService {
         createdById: user.sub,
       },
     });
+
+    // Told, not blocked on: an instructor posting coursework should not wait on
+    // a mail provider, and a provider having a bad day must not fail the post.
+    void this.notifyAssignmentPosted(assignment.id).catch(() => undefined);
+    return assignment;
+  }
+
+  /**
+   * Email the students this assignment is actually for — the whole class, or
+   * just the targeted group when one is set. Sequential like the class
+   * reminders: a cohort is tens of addresses, and pacing them is kinder to the
+   * mail provider than a burst.
+   */
+  private async notifyAssignmentPosted(assignmentId: string): Promise<void> {
+    const assignment = await this.prisma.assignment.findUnique({
+      where: { id: assignmentId },
+      select: {
+        id: true,
+        title: true,
+        dueAt: true,
+        groupId: true,
+        course: { select: { id: true, title: true, timezone: true } },
+      },
+    });
+    if (!assignment) return;
+
+    const enrollments = await this.prisma.enrollment.findMany({
+      where: {
+        courseId: assignment.course.id,
+        ...(assignment.groupId
+          ? { student: { groupMemberships: { some: { groupId: assignment.groupId } } } }
+          : {}),
+      },
+      select: { student: { select: { email: true, name: true } } },
+    });
+
+    const base = process.env.WEB_URL ?? 'http://localhost:3001';
+    const url = `${base}/courses/${assignment.course.id}/assignments/${assignment.id}`;
+    const dueLabel = assignment.dueAt
+      ? new Intl.DateTimeFormat('en-GB', {
+          dateStyle: 'full',
+          timeStyle: 'short',
+          timeZone: assignment.course.timezone ?? 'UTC',
+        }).format(assignment.dueAt)
+      : null;
+
+    let sent = 0;
+    for (const { student } of enrollments) {
+      if (!student?.email) continue;
+      await this.mail.sendAssignmentPosted(
+        student.email,
+        student.name ?? 'there',
+        assignment.course.title,
+        assignment.title,
+        dueLabel,
+        url,
+      );
+      sent++;
+    }
+    this.logger.log(
+      `Notified ${sent} student(s) of "${assignment.title}"` +
+        `${assignment.groupId ? ' (group only)' : ''}.`,
+    );
   }
 
   /**
