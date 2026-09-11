@@ -130,6 +130,20 @@ export class RoomGateway
     }
     client.data.user = user;
     client.data.sessionIds = new Set();
+    // A recorder token is a camera, not a participant. It names the person who
+    // pressed Record, so every ownership check in here would wave it through —
+    // which means the one place to stop it writing is before any handler runs,
+    // not in each of them. Anything but the join is dropped, and future
+    // handlers are covered without having to remember this.
+    if (user.recorder) {
+      client.use((packet, next) => {
+        const event = (packet as unknown[])[0];
+        if (event === 'room:join') return next();
+        // Dropped silently: an error here would only tell a browser we do not
+        // control something it cannot act on.
+        return;
+      });
+    }
 
     // Same gate as the HTTP guard: disabled or unverified accounts can't hold a
     // live socket (the token is long-lived, so re-check against current state).
@@ -203,9 +217,19 @@ export class RoomGateway
     // own or be enrolled.
     const isAdmin = user.role === Role.ORG_ADMIN;
     const teaching = isAdmin && p.as === 'teach';
-    const shadow = isAdmin && !teaching;
+    // A recorder watches the way a shadowing admin does: it must never enter
+    // presence, or the class would see a participant appear and learn it is
+    // being recorded — the one thing this feature promises not to reveal.
+    const isRecorder = user.recorder?.sessionId === p.sessionId;
+    const shadow = (isAdmin && !teaching) || isRecorder;
     client.data.teaching = teaching;
-    if (user.role === Role.INSTRUCTOR) {
+    if (user.recorder && !isRecorder) {
+      return this.fail(client, 'FORBIDDEN', 'Not the session this token films');
+    }
+    if (isRecorder) {
+      // Already established by the claim itself; no ownership test applies,
+      // because the recorder is not acting as anyone.
+    } else if (user.role === Role.INSTRUCTOR) {
       if (session.course.instructorId !== user.sub) {
         return this.fail(client, 'FORBIDDEN', 'Not your session');
       }

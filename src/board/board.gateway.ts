@@ -110,6 +110,16 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
     client.data.user = user;
     client.data.sessionIds = new Set();
+    // See RoomGateway: a recorder token names a real person, so every
+    // ownership check here would admit it as them. Drop everything but the
+    // join in one place rather than trusting each handler to remember.
+    if (user.recorder) {
+      client.use((packet, next) => {
+        const event = (packet as unknown[])[0];
+        if (event === 'board:join') return next();
+        return;
+      });
+    }
 
     const account = await this.authCache.getState(user.sub);
     if (!account || account.status === UserStatus.DISABLED || !account.emailVerified) {
@@ -161,9 +171,17 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // A teach-mode admin presents like the instructor; a plain admin observes
     // read-only. Everyone else is an instructor-owner or an enrolled student.
     const isAdmin = user.role === Role.ORG_ADMIN;
-    const teaching = isAdmin && p.as === 'teach';
+    // A recorder never presents; it only ever watches the one session it was
+    // minted for.
+    const isRecorder = user.recorder?.sessionId === p.sessionId;
+    if (user.recorder && !isRecorder) {
+      return this.fail(client, 'FORBIDDEN', 'Not the session this token films');
+    }
+    const teaching = !isRecorder && isAdmin && p.as === 'teach';
     client.data.teaching = teaching;
-    if (user.role === Role.INSTRUCTOR) {
+    if (isRecorder) {
+      // The claim is the authorisation; no ownership test applies.
+    } else if (user.role === Role.INSTRUCTOR) {
       if (session.course.instructorId !== user.sub) {
         return this.fail(client, 'FORBIDDEN', 'Not your session');
       }
