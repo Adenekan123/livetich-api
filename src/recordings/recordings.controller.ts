@@ -8,7 +8,7 @@ import {
   Post,
 } from '@nestjs/common';
 import { CurrentUser } from '../auth/current-user.decorator';
-import { Public } from '../auth/jwt-auth.guard';
+import { AllowRecorder, Public } from '../auth/jwt-auth.guard';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { ShareRecordingDto } from './dto/share-recording.dto';
 import { RecordingsService } from './recordings.service';
@@ -33,6 +33,20 @@ export class RecordingsController {
   @Post('sessions/:id/recording/stop')
   stop(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
     return this.recordings.stop(user, id);
+  }
+
+  /**
+   * Everything LiveKit's headless browser needs to watch the class it was sent
+   * to film: a hidden LiveKit token for the media, and the session's shape.
+   *
+   * The only route a recorder token may reach — the guard refuses it anywhere
+   * else — so the credential in that browser's URL bar cannot act as the
+   * instructor it names.
+   */
+  @AllowRecorder()
+  @Get('sessions/:id/recorder-context')
+  recorderContext(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.recordings.recorderContext(user, id);
   }
 
   /** The workspace's gallery, with its storage usage. */

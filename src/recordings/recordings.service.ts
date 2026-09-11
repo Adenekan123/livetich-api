@@ -10,6 +10,7 @@ import { randomBytes } from 'node:crypto';
 import { RecordingStatus, Role, SessionStatus } from '@prisma/client';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { PrismaService } from '../prisma/prisma.service';
+import { LivekitService } from '../sessions/livekit.service';
 import { OBJECT_STORAGE } from '../storage/object-storage';
 import type { ObjectStorage } from '../storage/object-storage';
 import { RecordingEgressService } from './recording-egress.service';
@@ -28,8 +29,45 @@ export class RecordingsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly egress: RecordingEgressService,
+    private readonly livekit: LivekitService,
     @Inject(OBJECT_STORAGE) private readonly storage: ObjectStorage,
   ) {}
+
+  /**
+   * What the recording browser needs once it has loaded the page: a LiveKit
+   * token for the room's audio and video.
+   *
+   * Hidden, so nobody in the class sees a participant appear — the instructor
+   * alone knows the class is being recorded, and a visible "Recorder" in the
+   * roster would say otherwise to everyone.
+   */
+  async recorderContext(user: JwtPayload, sessionId: string) {
+    if (!user.recorder || user.recorder.sessionId !== sessionId) {
+      throw new ForbiddenException('Not a recorder for this session');
+    }
+    const session = await this.prisma.liveSession.findUnique({
+      where: { id: sessionId },
+      select: {
+        id: true,
+        livekitRoom: true,
+        course: { select: { title: true } },
+      },
+    });
+    if (!session) throw new NotFoundException('Session not found');
+
+    const token = await this.livekit.mintJoinToken({
+      room: session.livekitRoom,
+      userId: `recorder-${user.recorder.recordingId}`,
+      name: 'Recording',
+      role: user.role,
+      hidden: true,
+    });
+    return {
+      livekitToken: token,
+      room: session.livekitRoom,
+      courseTitle: session.course.title,
+    };
+  }
 
   /** Only staff record or manage recordings; students never see the gallery. */
   private assertStaff(user: JwtPayload): string {
