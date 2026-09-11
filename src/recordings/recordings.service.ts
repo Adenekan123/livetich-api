@@ -9,10 +9,12 @@ import {
 import { randomBytes } from 'node:crypto';
 import { RecordingStatus, Role, SessionStatus } from '@prisma/client';
 import type { JwtPayload } from '../auth/jwt-payload';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { LivekitService } from '../sessions/livekit.service';
 import { OBJECT_STORAGE } from '../storage/object-storage';
 import type { ObjectStorage } from '../storage/object-storage';
+import { RecorderTokenService } from './recorder-token.service';
 import { RecordingEgressService } from './recording-egress.service';
 
 /** Signed playback links are short-lived; the gallery re-asks when it needs one. */
@@ -30,6 +32,8 @@ export class RecordingsService {
     private readonly prisma: PrismaService,
     private readonly egress: RecordingEgressService,
     private readonly livekit: LivekitService,
+    private readonly config: ConfigService,
+    private readonly recorderTokens: RecorderTokenService,
     @Inject(OBJECT_STORAGE) private readonly storage: ObjectStorage,
   ) {}
 
@@ -64,9 +68,34 @@ export class RecordingsService {
     });
     return {
       livekitToken: token,
+      // Handed over with the token, the way the classroom's own join does it —
+      // the recorder browser has no environment of its own to read.
+      url: this.config.get<string>('LIVEKIT_URL') ?? null,
       room: session.livekitRoom,
       courseTitle: session.course.title,
     };
+  }
+
+  /**
+   * Where LiveKit's browser can reach the recorder page, or null if it cannot.
+   *
+   * Egress runs on LiveKit's infrastructure, so the web app has to be
+   * reachable from the internet. A localhost WEB_URL is the normal state of a
+   * developer's machine, and silently filming a connection-refused page would
+   * be worse than falling back to the camera — so it is treated as "no page"
+   * and said out loud once.
+   */
+  private recorderBaseUrl(): string | null {
+    const raw = this.config.get<string>('WEB_URL')?.replace(/\/+$/, '');
+    if (!raw) return null;
+    if (/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(raw)) {
+      this.logger.warn(
+        `WEB_URL is ${raw}, which LiveKit cannot reach — recording the camera ` +
+          `only. Expose the web app (a tunnel is enough) to record the whole class.`,
+      );
+      return null;
+    }
+    return raw;
   }
 
   /** Only staff record or manage recordings; students never see the gallery. */
@@ -147,10 +176,16 @@ export class RecordingsService {
     if (running)
       throw new BadRequestException('This class is already recording');
 
-    // Nothing published means the recorder would join, find an empty stage,
-    // and be killed by LiveKit a minute later with an error the instructor
-    // cannot act on. Refuse now, while it is still obvious what to do.
-    if (!(await this.egress.hasPublisher(session.livekitRoom))) {
+    // Only when we are filming the room itself. Recording the page has
+    // something to show either way — a hifz lesson on the mushaf with every
+    // camera off is a perfectly good recording — whereas a room composite
+    // pointed at a room with nothing published waits a minute and then dies
+    // with an error the instructor cannot act on.
+    const recorderBase = this.recorderBaseUrl();
+    if (
+      !recorderBase &&
+      !(await this.egress.hasPublisher(session.livekitRoom))
+    ) {
       throw new BadRequestException(
         'Turn on your camera or microphone before recording — there is nothing to record yet.',
       );
@@ -174,10 +209,22 @@ export class RecordingsService {
     });
 
     try {
+      // The token can only be minted now: it names the recording it films, so
+      // that a leaked URL is worth exactly one lesson.
+      const recorderUrl = recorderBase
+        ? `${recorderBase}/record/${sessionId}?t=${encodeURIComponent(
+            await this.recorderTokens.mint({
+              sessionId,
+              recordingId: recording.id,
+              startedById: user.sub,
+            }),
+          )}`
+        : undefined;
       const { egressId, storageKey } = await this.egress.start({
         room: session.livekitRoom,
         organizationId,
         recordingId: recording.id,
+        recorderUrl,
       });
       return this.prisma.recording.update({
         where: { id: recording.id },

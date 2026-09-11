@@ -186,6 +186,12 @@ export class RecordingEgressService {
     room: string;
     organizationId: string;
     recordingId: string;
+    /**
+     * The recorder page for this session. When present the whole lesson is
+     * filmed — board, mushaf, shared media and the camera together — instead
+     * of only the room's tracks.
+     */
+    recorderUrl?: string;
   }): Promise<{ egressId: string; storageKey: string }> {
     if (!this.isConfigured) {
       throw new ServiceUnavailableException(
@@ -219,18 +225,27 @@ export class RecordingEgressService {
       },
     });
 
-    const info = await this.client().startRoomCompositeEgress(
-      opts.room,
-      output,
-      {
-        // The grid layout follows whoever is speaking, which for a class is the
-        // instructor almost all of the time.
-        layout: 'speaker',
-        encodingOptions: this.encodingOptions(),
-      },
-    );
+    // Recording the page captures the lesson; recording the room captures only
+    // the people in it. The second is the fallback for a deployment whose web
+    // app LiveKit cannot reach — see WEB_URL — because a recording of the
+    // camera alone still beats no recording at all.
+    const info = opts.recorderUrl
+      ? await this.client().startWebEgress(opts.recorderUrl, output, {
+          encodingOptions: this.encodingOptions(),
+          // The page says when it has the board and the room, so egress never
+          // films the loading state. This is the same START_RECORDING signal
+          // whose absence shows up as "Start signal not received".
+          awaitStartSignal: true,
+        })
+      : await this.client().startRoomCompositeEgress(opts.room, output, {
+          // The grid layout follows whoever is speaking, which for a class is
+          // the instructor almost all of the time.
+          layout: 'speaker',
+          encodingOptions: this.encodingOptions(),
+        });
     this.logger.log(
-      `Recording ${opts.recordingId} started (egress ${info.egressId}) -> ${storageKey}`,
+      `Recording ${opts.recordingId} started (egress ${info.egressId}, ` +
+        `${opts.recorderUrl ? 'whole class' : 'camera only'}) -> ${storageKey}`,
     );
     return { egressId: info.egressId, storageKey };
   }
