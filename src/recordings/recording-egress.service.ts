@@ -5,13 +5,16 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
+  AudioCodec,
   EgressClient,
   EgressStatus,
   EncodedFileOutput,
   EncodedFileType,
+  EncodingOptions,
   RoomServiceClient,
   S3Upload,
   TwirpError,
+  VideoCodec,
 } from 'livekit-server-sdk';
 
 /**
@@ -22,6 +25,51 @@ import {
  * request timeouts, and nothing to clean up if the process restarts mid-class.
  * We only ever hold the egress id and, once LiveKit tells us, the object key.
  */
+/**
+ * How hard to compress a recording.
+ *
+ * A class is unusually cheap to encode: the camera is a talking head and the
+ * rest of the frame is a whiteboard or slides that barely move. H.264 spends
+ * almost nothing on static regions, so the bitrate can come down a long way
+ * before anything is visible.
+ *
+ * What we do *not* trade away is resolution. Dropping to 720p is the obvious
+ * saving and the wrong one — it is the whiteboard's handwriting and the code
+ * on a slide that go first, and those are the point of the recording.
+ * Framerate is the safe lever instead: 24 is plenty for a lecture.
+ *
+ * LiveKit's own default is 1080p30 at 3000kbps, which is what every recording
+ * made before this used.
+ */
+const QUALITY = {
+  /** LiveKit's default. Use when storage is not the constraint. */
+  high: {
+    width: 1920,
+    height: 1080,
+    framerate: 30,
+    videoBitrate: 3000,
+    audioBitrate: 128,
+  },
+  /** Visually equivalent for this content at roughly half the size. */
+  balanced: {
+    width: 1920,
+    height: 1080,
+    framerate: 24,
+    videoBitrate: 1600,
+    audioBitrate: 96,
+  },
+  /** Noticeably softer on fine detail. For archives nobody watches closely. */
+  compact: {
+    width: 1280,
+    height: 720,
+    framerate: 20,
+    videoBitrate: 900,
+    audioBitrate: 64,
+  },
+} as const;
+
+type QualityName = keyof typeof QUALITY;
+
 @Injectable()
 export class RecordingEgressService {
   private readonly logger = new Logger(RecordingEgressService.name);
@@ -67,6 +115,34 @@ export class RecordingEgressService {
 
   storageKey(organizationId: string, recordingId: string): string {
     return `recordings/${organizationId}/${recordingId}.mp4`;
+  }
+
+  /**
+   * Chosen with RECORDING_QUALITY; anything unrecognised falls back to
+   * balanced rather than failing a recording over a typo in the environment.
+   */
+  private encodingOptions(): EncodingOptions {
+    const name = (
+      this.config.get<string>('RECORDING_QUALITY') ?? 'balanced'
+    ).toLowerCase();
+    const preset = QUALITY[name as QualityName] ?? QUALITY.balanced;
+    if (!(name in QUALITY)) {
+      this.logger.warn(
+        `RECORDING_QUALITY="${name}" is not one of ${Object.keys(QUALITY).join(', ')}; using balanced`,
+      );
+    }
+    return new EncodingOptions({
+      width: preset.width,
+      height: preset.height,
+      framerate: preset.framerate,
+      videoCodec: VideoCodec.H264_MAIN,
+      videoBitrate: preset.videoBitrate,
+      audioCodec: AudioCodec.AAC,
+      audioBitrate: preset.audioBitrate,
+      // Four seconds between keyframes rather than two. Costs a little seek
+      // precision in the player, saves a lot of bits on near-static frames.
+      keyFrameInterval: 4,
+    });
   }
 
   private roomClient(): RoomServiceClient {
@@ -150,6 +226,7 @@ export class RecordingEgressService {
         // The grid layout follows whoever is speaking, which for a class is the
         // instructor almost all of the time.
         layout: 'speaker',
+        encodingOptions: this.encodingOptions(),
       },
     );
     this.logger.log(
