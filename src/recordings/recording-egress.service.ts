@@ -9,6 +9,7 @@ import {
   EgressStatus,
   EncodedFileOutput,
   EncodedFileType,
+  RoomServiceClient,
   S3Upload,
   TwirpError,
 } from 'livekit-server-sdk';
@@ -57,6 +58,39 @@ export class RecordingEgressService {
    */
   storageKey(organizationId: string, recordingId: string): string {
     return `recordings/${organizationId}/${recordingId}.mp4`;
+  }
+
+  private roomClient(): RoomServiceClient {
+    return new RoomServiceClient(
+      this.config
+        .get<string>('LIVEKIT_URL')!
+        .replace(/^wss:/, 'https:')
+        .replace(/^ws:/, 'http:'),
+      this.config.get<string>('LIVEKIT_API_KEY'),
+      this.config.get<string>('LIVEKIT_API_SECRET'),
+    );
+  }
+
+  /**
+   * Whether anyone in the room has published a track.
+   *
+   * A room composite recorder joins the room and only signals that it has
+   * started once it has something to render. Against a room where nothing is
+   * published it waits, and after about a minute LiveKit gives up with
+   * "Start signal not received" — a real recording that silently never was.
+   *
+   * Checking first turns that into an immediate, explicable refusal. A muted
+   * track still counts: it exists, so the compositor has something to draw.
+   */
+  async hasPublisher(room: string): Promise<boolean> {
+    try {
+      const participants = await this.roomClient().listParticipants(room);
+      return participants.some((p) => (p.tracks?.length ?? 0) > 0);
+    } catch (e) {
+      // No such room yet is the same answer as an empty one.
+      if (e instanceof TwirpError && e.code === 'not_found') return false;
+      throw e;
+    }
   }
 
   /**
@@ -153,10 +187,14 @@ export class RecordingEgressService {
       complete: info.status === EgressStatus.EGRESS_COMPLETE,
       sizeBytes: file?.size == null ? undefined : Number(file.size),
       // LiveKit reports nanoseconds.
+      // LiveKit leaves the file's duration unset on Cloud, but always stamps
+      // the egress itself, so fall back to how long it actually ran.
       durationSec:
-        file?.duration == null
-          ? undefined
-          : Math.round(Number(file.duration) / 1e9),
+        file?.duration != null
+          ? Math.round(Number(file.duration) / 1e9)
+          : info.startedAt && info.endedAt
+            ? Math.round(Number(info.endedAt - info.startedAt) / 1e9)
+            : undefined,
       error:
         info.error ||
         (info.status === EgressStatus.EGRESS_ABORTED

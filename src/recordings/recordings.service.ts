@@ -109,6 +109,15 @@ export class RecordingsService {
     if (running)
       throw new BadRequestException('This class is already recording');
 
+    // Nothing published means the recorder would join, find an empty stage,
+    // and be killed by LiveKit a minute later with an error the instructor
+    // cannot act on. Refuse now, while it is still obvious what to do.
+    if (!(await this.egress.hasPublisher(session.livekitRoom))) {
+      throw new BadRequestException(
+        'Turn on your camera or microphone before recording — there is nothing to record yet.',
+      );
+    }
+
     const { full } = await this.usage(organizationId);
     if (full) {
       throw new BadRequestException(
