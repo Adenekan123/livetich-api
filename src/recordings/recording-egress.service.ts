@@ -6,9 +6,11 @@ import {
 import { ConfigService } from '@nestjs/config';
 import {
   EgressClient,
+  EgressStatus,
   EncodedFileOutput,
   EncodedFileType,
   S3Upload,
+  TwirpError,
 } from 'livekit-server-sdk';
 
 /**
@@ -105,6 +107,62 @@ export class RecordingEgressService {
       `Recording ${opts.recordingId} started (egress ${info.egressId}) -> ${storageKey}`,
     );
     return { egressId: info.egressId, storageKey };
+  }
+
+  /**
+   * Ask LiveKit what actually became of an egress.
+   *
+   * The webhook is the fast path, but it is a call *into* this API, which fails
+   * whenever we are not publicly reachable — in development, behind a firewall,
+   * or during a deploy. This is the same answer, pulled rather than pushed, and
+   * it is what lets a stuck recording resolve itself.
+   *
+   * Null when LiveKit no longer knows about it; it keeps egress history only so
+   * long.
+   */
+  async describe(egressId: string): Promise<{
+    finished: boolean;
+    complete: boolean;
+    sizeBytes?: number;
+    durationSec?: number;
+    error?: string;
+  } | null> {
+    let info;
+    try {
+      [info] = await this.client().listEgress({ egressId });
+    } catch (e) {
+      // LiveKit answers an unknown egress by throwing, not by returning an
+      // empty list. That is still an answer — "there is no such recording" —
+      // and it has to be distinguishable from the network being down, or a
+      // recording that LiveKit has genuinely forgotten would be retried
+      // forever instead of ever being abandoned. Every other error rethrows
+      // and stays transient.
+      if (e instanceof TwirpError && e.code === 'not_found') return null;
+      throw e;
+    }
+    if (!info) return null;
+
+    const finished =
+      info.status === EgressStatus.EGRESS_COMPLETE ||
+      info.status === EgressStatus.EGRESS_FAILED ||
+      info.status === EgressStatus.EGRESS_ABORTED ||
+      info.status === EgressStatus.EGRESS_LIMIT_REACHED;
+    const file = info.fileResults?.[0];
+    return {
+      finished,
+      complete: info.status === EgressStatus.EGRESS_COMPLETE,
+      sizeBytes: file?.size == null ? undefined : Number(file.size),
+      // LiveKit reports nanoseconds.
+      durationSec:
+        file?.duration == null
+          ? undefined
+          : Math.round(Number(file.duration) / 1e9),
+      error:
+        info.error ||
+        (info.status === EgressStatus.EGRESS_ABORTED
+          ? 'LiveKit aborted the recording'
+          : undefined),
+    };
   }
 
   /**
