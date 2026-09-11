@@ -32,6 +32,18 @@ enum SessionStatus {
   ENDED
 }
 
+enum RecordingStatus {
+  /// Egress requested; LiveKit has not confirmed it yet.
+  STARTING
+  /// Capturing live.
+  RECORDING
+  /// Room closed; LiveKit is still writing the file to R2.
+  PROCESSING
+  /// File in R2, playable.
+  READY
+  FAILED
+}
+
 enum QuizType {
   SECTION
   BUZZER
@@ -77,6 +89,11 @@ model Organization {
   preClassReminder       Boolean @default(false)
   /// Lead time for that reminder, in minutes before the meeting start.
   reminderLeadMinutes    Int     @default(30)
+  /// Recording storage this workspace may use, in bytes. Null = no ceiling.
+  /// Usage is the sum of its recordings; nothing is deleted automatically, so
+  /// the gallery warns as this is approached and refuses new recordings past it.
+  storageQuotaBytes BigInt?
+
   /// Default lifetime for new invite links, in days. Null = links never expire.
   /// Applied at invite-creation time when no explicit expiry is given.
   inviteLinkExpiryDays   Int?
@@ -88,6 +105,7 @@ model Organization {
   courses     Course[]
   invites     Invite[]
   orgPlugins  OrgPlugin[]
+  recordings Recording[]
 }
 
 /// An enabled add-on pack for a tenant. The catalog of pluginKeys lives in code
@@ -185,6 +203,7 @@ model User {
   codingFeedback           CodingFeedback[]      @relation("codingFeedbackAuthor")
 
   @@index([organizationId])
+  recordingsStarted Recording[]
 }
 
 /**
@@ -271,6 +290,7 @@ model Course {
   @@index([instructorId])
   @@index([organizationId])
   @@index([parentCourseId])
+  recordings Recording[]
 }
 
 model Section {
@@ -394,6 +414,7 @@ model LiveSession {
 
   course            Course             @relation(fields: [courseId], references: [id])
   section           Section?           @relation(fields: [sectionId], references: [id])
+  recordings        Recording[]
   messages          ChatMessage[]
   quizzes           Quiz[]
   attendances       Attendance[]
@@ -422,6 +443,55 @@ model Attendance {
 /// One row per (course, meeting day) the pre-class reminder cron has emailed —
 /// the dedupe key so a class occurrence is never reminded twice. `dateKey` is
 /// the occurrence's local calendar day in the course tz ("YYYY-MM-DD").
+/**
+ * A recorded class.
+ *
+ * The video itself never passes through this API: LiveKit's egress writes it
+ * straight to R2, and the gallery hands out time-limited signed URLs. This row
+ * is the record of where it went and what happened to it.
+ *
+ * Scoped to the organization, like courses and sessions — the workspace owns
+ * the storage and its staff share one gallery.
+ */
+model Recording {
+  id             String          @id @default(cuid())
+  sessionId      String
+  courseId       String
+  organizationId String
+  /// Who pressed record. Kept even if they later leave the workspace.
+  startedById    String
+
+  status RecordingStatus @default(STARTING)
+  /// LiveKit's egress id — used to stop it, and to match its webhooks back.
+  egressId String? @unique
+  /// R2 object key. Null until LiveKit reports the finished file.
+  storageKey String?
+  /// Bytes. A two-hour class runs past a 32-bit int, so this is a BigInt.
+  sizeBytes   BigInt?
+  durationSec Int?
+  /// Why it failed, when it did — shown in the gallery rather than swallowed.
+  error String?
+
+  /// Share link. Null until someone deliberately releases the recording; a
+  /// recorded class holds students' faces and voices, so it stays staff-only
+  /// until then.
+  shareToken     String?   @unique
+  shareExpiresAt DateTime?
+
+  createdAt DateTime  @default(now())
+  readyAt   DateTime?
+
+  session      LiveSession  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  course       Course       @relation(fields: [courseId], references: [id])
+  organization Organization @relation(fields: [organizationId], references: [id])
+  startedBy    User         @relation(fields: [startedById], references: [id])
+
+  @@index([organizationId, createdAt])
+  @@index([sessionId])
+  @@index([courseId])
+  @@index([startedById])
+}
+
 model SessionReminder {
   id       String   @id @default(cuid())
   courseId String

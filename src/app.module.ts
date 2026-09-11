@@ -34,6 +34,7 @@ import { RealtimeModule } from './realtime/realtime.module';
 import { ObservabilityModule } from './observability/observability.module';
 import { AdminModule } from './admin/admin.module';
 import { RemindersModule } from './reminders/reminders.module';
+import { RecordingsModule } from './recordings/recordings.module';
 
 @Module({
   imports: [
@@ -76,6 +77,7 @@ import { RemindersModule } from './reminders/reminders.module';
     AssessmentModule,
     ExamsModule,
     SessionsModule,
+    RecordingsModule,
     QuizModule,
     PointsModule,
     CertificatesModule,

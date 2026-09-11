@@ -5,7 +5,9 @@ import { AppModule } from './app.module';
 import { RedisIoAdapter } from './redis/redis-io.adapter';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  // rawBody: LiveKit signs its webhooks over the exact bytes it sent, so the
+  // parsed object is not enough to verify one.
+  const app = await NestFactory.create(AppModule, { rawBody: true });
 
   // Security headers (HSTS, nosniff, no-framing, …). The API is consumed by the
   // web app on another origin, so resources may be read cross-origin.
