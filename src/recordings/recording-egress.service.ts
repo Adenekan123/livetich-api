@@ -56,6 +56,15 @@ export class RecordingEgressService {
    * under one prefix — which is what makes "delete the workspace" or "measure
    * its usage" a prefix operation rather than a table scan.
    */
+  /**
+   * Where LiveKit put the manifest for a recording made before manifests were
+   * turned off. It is named after the egress, not the recording, so it cannot
+   * be derived from the storage key alone.
+   */
+  legacyManifestKey(organizationId: string, egressId: string): string {
+    return `recordings/${organizationId}/${egressId}.json`;
+  }
+
   storageKey(organizationId: string, recordingId: string): string {
     return `recordings/${organizationId}/${recordingId}.mp4`;
   }
@@ -113,6 +122,12 @@ export class RecordingEgressService {
     const output = new EncodedFileOutput({
       fileType: EncodedFileType.MP4,
       filepath: storageKey,
+      // LiveKit otherwise writes a small JSON manifest beside the video, named
+      // after the egress rather than the recording. Nothing reads it, it is
+      // not counted against the workspace's quota, and deleting a recording
+      // left it behind — so it only ever accumulated. We keep the same facts
+      // on the row itself.
+      disableManifest: true,
       output: {
         case: 's3',
         value: new S3Upload({

@@ -378,6 +378,18 @@ export class RecordingsService {
         );
       });
     }
+    if (recording.egressId) {
+      // Recordings made before manifests were turned off have a small JSON
+      // file beside the video. Deleting the row is the last chance to find it:
+      // it is named after the egress, which nothing else records.
+      const manifest = this.egress.legacyManifestKey(
+        organizationId,
+        recording.egressId,
+      );
+      await this.storage.delete(manifest).catch(() => {
+        // Almost always simply absent, which is the expected case now.
+      });
+    }
     await this.prisma.recording.delete({ where: { id } });
     return { deleted: true };
   }
