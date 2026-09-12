@@ -13,6 +13,7 @@ import {
   EncodingOptions,
   RoomServiceClient,
   S3Upload,
+  TrackType,
   TwirpError,
   VideoCodec,
 } from 'livekit-server-sdk';
@@ -208,6 +209,30 @@ export class RecordingEgressService {
    * Start recording a room. Returns LiveKit's egress id, which is how we stop
    * it later and how its webhooks are matched back to our row.
    */
+  /**
+   * Whether this person currently has live audio in the room.
+   *
+   * A published-but-muted track does not count: the question being asked is
+   * "will this recording have a voice in it", and a muted microphone answers
+   * no just as firmly as an absent one.
+   */
+  async hasLiveMic(room: string, identity: string): Promise<boolean> {
+    try {
+      const participants = await this.roomClient().listParticipants(room);
+      const me = participants.find((p) => p.identity === identity);
+      return (me?.tracks ?? []).some(
+        (t) => t.type === TrackType.AUDIO && !t.muted,
+      );
+    } catch (e) {
+      // No room at all means no live microphone — that is an answer, and the
+      // warning it produces is the correct one. Anything else is us failing to
+      // find out, which is rethrown so the caller can stay quiet rather than
+      // cry wolf about a microphone that may well be on.
+      if (e instanceof TwirpError && e.code === 'not_found') return false;
+      throw e;
+    }
+  }
+
   async start(opts: {
     room: string;
     organizationId: string;

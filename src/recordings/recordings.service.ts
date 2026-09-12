@@ -265,13 +265,29 @@ export class RecordingsService {
   /** What the classroom shows on the Record button. */
   async statusFor(user: JwtPayload, sessionId: string) {
     const organizationId = this.assertStaff(user);
-    const recording = await this.prisma.recording.findFirst({
-      where: { sessionId, organizationId },
-      orderBy: { createdAt: 'desc' },
-      select: { id: true, status: true, createdAt: true, error: true },
-    });
+    const [recording, session] = await Promise.all([
+      this.prisma.recording.findFirst({
+        where: { sessionId, organizationId },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true, status: true, createdAt: true, error: true },
+      }),
+      this.prisma.liveSession.findUnique({
+        where: { id: sessionId },
+        select: { livekitRoom: true },
+      }),
+    ]);
+    // A recording with no voice in it is a wasted lesson, and nothing about
+    // the picture reveals it while you are teaching. Reported so the classroom
+    // can say so before the instructor commits, not after.
+    const micLive =
+      this.egress.isConfigured && session
+        ? await this.egress
+            .hasLiveMic(session.livekitRoom, user.sub)
+            .catch(() => true)
+        : true;
     return {
       available: this.egress.isConfigured,
+      micLive,
       recording:
         recording &&
         (recording.status === RecordingStatus.STARTING ||
