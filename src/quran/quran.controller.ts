@@ -7,8 +7,12 @@ import {
   ParseIntPipe,
   UseGuards,
 } from '@nestjs/common';
+import { AllowRecorder } from '../auth/jwt-auth.guard';
 import { PLUGIN_ISLAMIC_EDUCATION } from '../plugins/catalog';
-import { RequirePlugin, RequirePluginGuard } from '../plugins/require-plugin.guard';
+import {
+  RequirePlugin,
+  RequirePluginGuard,
+} from '../plugins/require-plugin.guard';
 import { getSurahAyahs } from './quran-text';
 import { SURAHS, TOTAL_AYAHS } from './surahs';
 
@@ -20,6 +24,11 @@ import { SURAHS, TOTAL_AYAHS } from './surahs';
  * org that has the pack on, but not course-scoped.
  */
 @Controller('quran')
+// The recorder reads the mushaf too. This is fixed reference data — the same
+// text for every org with the pack — so letting a recorder token read it gives
+// away nothing about anyone, and refusing it left a recorded hifz lesson
+// showing "Could not load surah" where the ayah should be.
+@AllowRecorder()
 @UseGuards(RequirePluginGuard)
 @RequirePlugin(PLUGIN_ISLAMIC_EDUCATION)
 export class QuranController {

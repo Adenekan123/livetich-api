@@ -11,6 +11,7 @@ import {
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
+import { AllowRecorder } from '../auth/jwt-auth.guard';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Role } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
@@ -80,6 +81,12 @@ export class BoardAssetController {
     return { url: `/api/files/board-asset/${id}` };
   }
 
+  /**
+   * Serving one asset by its opaque id. Open to a recorder token as well as a
+   * session: an image or PDF on the board is part of the lesson, and without
+   * this a recording shows empty frames where the slides were.
+   */
+  @AllowRecorder()
   @Get('files/board-asset/:id')
   async serve(@Param('id') id: string) {
     const stream = await this.storage.getStream(assetKey(id));
