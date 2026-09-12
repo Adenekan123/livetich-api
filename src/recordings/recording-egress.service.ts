@@ -49,22 +49,46 @@ const QUALITY = {
     framerate: 30,
     videoBitrate: 3000,
     audioBitrate: 128,
+    keyFrameInterval: 2,
   },
-  /** Visually equivalent for this content at roughly half the size. */
+  /**
+   * The default. Full resolution, because the handwriting and the ayah are
+   * the recording, and every other dial turned down instead: half the frames
+   * (a lesson is not sport), a bitrate ceiling the content rarely reaches
+   * anyway, and speech-rate audio.
+   */
   balanced: {
     width: 1920,
     height: 1080,
-    framerate: 24,
-    videoBitrate: 1600,
-    audioBitrate: 96,
+    framerate: 15,
+    videoBitrate: 1200,
+    audioBitrate: 64,
+    keyFrameInterval: 4,
   },
-  /** Noticeably softer on fine detail. For archives nobody watches closely. */
+  /**
+   * Half the pixels. Slide text and a thick marker survive this; small
+   * handwriting and dense mushaf vowel marks start to soften, so it is for
+   * archives that get kept rather than re-watched closely.
+   */
   compact: {
     width: 1280,
     height: 720,
-    framerate: 20,
-    videoBitrate: 900,
-    audioBitrate: 64,
+    framerate: 12,
+    videoBitrate: 600,
+    audioBitrate: 48,
+    keyFrameInterval: 6,
+  },
+  /**
+   * Barely video: enough to follow a board being written on, and speech that
+   * is still clear. For keeping a year of lessons rather than watching them.
+   */
+  minimal: {
+    width: 1280,
+    height: 720,
+    framerate: 8,
+    videoBitrate: 300,
+    audioBitrate: 40,
+    keyFrameInterval: 8,
   },
 } as const;
 
@@ -135,13 +159,15 @@ export class RecordingEgressService {
       width: preset.width,
       height: preset.height,
       framerate: preset.framerate,
-      videoCodec: VideoCodec.H264_MAIN,
+      // High profile over Main: same picture, a few percent fewer bits, and
+      // every browser and phone from the last decade decodes it.
+      videoCodec: VideoCodec.H264_HIGH,
       videoBitrate: preset.videoBitrate,
       audioCodec: AudioCodec.AAC,
       audioBitrate: preset.audioBitrate,
-      // Four seconds between keyframes rather than two. Costs a little seek
-      // precision in the player, saves a lot of bits on near-static frames.
-      keyFrameInterval: 4,
+      // Seeking granularity traded for size. A near-static board costs almost
+      // nothing between keyframes, so the longer the gap the better it packs.
+      keyFrameInterval: preset.keyFrameInterval,
     });
   }
 
