@@ -42,6 +42,12 @@ import {
  * LiveKit's own default is 1080p30 at 3000kbps, which is what every recording
  * made before this used.
  */
+/**
+ * Framerate stays at 15 or above in every preset. Below that LiveKit's
+ * pipeline dies with "GStreamer error: clock problem" — 12fps and 8fps were
+ * both tried and both failed outright, which is worse than any file size.
+ * Resolution and bitrate are the dials that are actually safe to turn.
+ */
 const QUALITY = {
   /** LiveKit's default. Use when storage is not the constraint. */
   high: {
@@ -74,10 +80,10 @@ const QUALITY = {
   compact: {
     width: 1280,
     height: 720,
-    framerate: 12,
+    framerate: 15,
     videoBitrate: 600,
     audioBitrate: 48,
-    keyFrameInterval: 6,
+    keyFrameInterval: 4,
   },
   /**
    * Barely video: enough to follow a board being written on, and speech that
@@ -86,10 +92,10 @@ const QUALITY = {
   minimal: {
     width: 1280,
     height: 720,
-    framerate: 8,
+    framerate: 15,
     videoBitrate: 300,
     audioBitrate: 40,
-    keyFrameInterval: 8,
+    keyFrameInterval: 4,
   },
 } as const;
 
