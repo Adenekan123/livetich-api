@@ -494,11 +494,22 @@ export class AssignmentsService {
         id: true,
         assignmentId: true,
         studentId: true,
-        assignment: { select: { courseId: true } },
+        assignment: { select: { courseId: true, maxPoints: true } },
       },
     });
     if (!submission) throw new NotFoundException('Submission not found');
     await this.getManageable(user, submission.assignmentId);
+
+    // A grade is worth points on the course leaderboard, so an out-of-range one
+    // is not merely a wrong number on a page — it silently outranks everyone
+    // else. Refuse it here rather than in the DTO: the ceiling belongs to the
+    // assignment, not to the request shape.
+    const { maxPoints } = submission.assignment;
+    if (maxPoints != null && dto.grade > maxPoints) {
+      throw new BadRequestException(
+        `This assignment is out of ${maxPoints}, so ${dto.grade} is too high.`,
+      );
+    }
 
     const { studentId } = submission;
     const courseId = submission.assignment.courseId;
