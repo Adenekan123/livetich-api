@@ -89,23 +89,48 @@ model Organization {
   preClassReminder       Boolean @default(false)
   /// Lead time for that reminder, in minutes before the meeting start.
   reminderLeadMinutes    Int     @default(30)
-  /// Recording storage this workspace may use, in bytes. Null = no ceiling.
-  /// Usage is the sum of its recordings; nothing is deleted automatically, so
-  /// the gallery warns as this is approached and refuses new recordings past it.
-  storageQuotaBytes BigInt?
+  /// Recording storage this workspace may use, in bytes. Usage is the sum of
+  /// its recordings; the gallery warns as this is approached and refuses new
+  /// recordings past it.
+  ///
+  /// Defaulted rather than left open. Null still means "no ceiling", but it is
+  /// now something an operator has to choose for a specific customer, instead
+  /// of what every workspace silently got by being created.
+  storageQuotaBytes      BigInt? @default(5368709120) // 5 GB
+
+  /// How long a recording is kept before the nightly sweep removes it, in days.
+  /// Null = kept forever, which is again a deliberate choice rather than the
+  /// default. A quota on its own only postpones the problem: without an expiry
+  /// every workspace grows until it hits the ceiling, and the only way out is
+  /// asking a paying customer to delete their own lessons.
+  recordingRetentionDays Int? @default(365)
+
+  /// Ceiling on a single recording, in minutes. Null = uncapped.
+  ///
+  /// The quota is checked when Record is pressed, but a file's size is not
+  /// known until it has finished uploading — so without this a workspace one
+  /// megabyte under its limit could still start a three-hour lesson and
+  /// overshoot without bound. This is what makes the overshoot finite.
+  maxRecordingMinutes Int? @default(180)
+
+  /// Encoding preset for this workspace's recordings: high, balanced, compact
+  /// or minimal (see RecordingEgressService). Lets a free tier record at half
+  /// the size without touching anyone else.
+  recordingQuality String @default("balanced")
 
   /// Default lifetime for new invite links, in days. Null = links never expire.
   /// Applied at invite-creation time when no explicit expiry is given.
-  inviteLinkExpiryDays   Int?
+  inviteLinkExpiryDays Int?
 
   createdAt DateTime @default(now())
 
-  users       User[]
-  memberships Membership[]
-  courses     Course[]
-  invites     Invite[]
-  orgPlugins  OrgPlugin[]
-  recordings Recording[]
+  users         User[]
+  memberships   Membership[]
+  courses       Course[]
+  invites       Invite[]
+  orgPlugins    OrgPlugin[]
+  recordings    Recording[]
+  quickAccesses QuickAccess[]
 }
 
 /// An enabled add-on pack for a tenant. The catalog of pluginKeys lives in code
@@ -201,9 +226,10 @@ model User {
   codingSubmissions        CodingSubmission[]    @relation("codingStudent")
   codingReviewed           CodingSubmission[]    @relation("codingReviewer")
   codingFeedback           CodingFeedback[]      @relation("codingFeedbackAuthor")
+  recordingsStarted        Recording[]
+  quickAccesses            QuickAccess[]
 
   @@index([organizationId])
-  recordingsStarted Recording[]
 }
 
 /**
@@ -286,11 +312,11 @@ model Course {
   hifzEntries         HifzEntry[]
   exams               Exam[]
   codingAssignments   CodingAssignment[]
+  recordings          Recording[]
 
   @@index([instructorId])
   @@index([organizationId])
   @@index([parentCourseId])
-  recordings Recording[]
 }
 
 model Section {
@@ -445,32 +471,30 @@ model Attendance {
 /// the occurrence's local calendar day in the course tz ("YYYY-MM-DD").
 /**
  * A recorded class.
- *
  * The video itself never passes through this API: LiveKit's egress writes it
  * straight to R2, and the gallery hands out time-limited signed URLs. This row
  * is the record of where it went and what happened to it.
- *
  * Scoped to the organization, like courses and sessions — the workspace owns
  * the storage and its staff share one gallery.
  */
 model Recording {
-  id             String          @id @default(cuid())
+  id             String @id @default(cuid())
   sessionId      String
   courseId       String
   organizationId String
   /// Who pressed record. Kept even if they later leave the workspace.
   startedById    String
 
-  status RecordingStatus @default(STARTING)
+  status      RecordingStatus @default(STARTING)
   /// LiveKit's egress id — used to stop it, and to match its webhooks back.
-  egressId String? @unique
+  egressId    String?         @unique
   /// R2 object key. Null until LiveKit reports the finished file.
-  storageKey String?
+  storageKey  String?
   /// Bytes. A two-hour class runs past a 32-bit int, so this is a BigInt.
   sizeBytes   BigInt?
   durationSec Int?
   /// Why it failed, when it did — shown in the gallery rather than swallowed.
-  error String?
+  error       String?
 
   /// Share link. Null until someone deliberately releases the recording; a
   /// recorded class holds students' faces and voices, so it stays staff-only
@@ -1174,4 +1198,45 @@ model AiUsage {
   @@index([feature, at])
   @@index([model, at])
   @@index([orgId, at])
+}
+
+/// A student's fast lane back into their workspace.
+///
+/// Not a second way to be authenticated — redeeming one mints exactly the same
+/// session a password login does, so every guard, role check and enrolment rule
+/// downstream is untouched. It only replaces *how* the student proves who they
+/// are on a device they have already used.
+///
+/// The shortcut URL carries `slug`, which is public and identifies nobody by
+/// name. The passcode is what authenticates, and it is stored only as a hash —
+/// a leaked or shared shortcut is inert on its own.
+model QuickAccess {
+  id             String @id @default(cuid())
+  userId         String
+  organizationId String
+
+  /// The public half, and all that appears in the URL. Opaque and rotatable.
+  slug         String @unique
+  /// bcrypt, never the code itself.
+  passcodeHash String
+
+  /// Throttling. A URL is guessable-adjacent by design — it may be shared, or
+  /// sit in someone's browser history — so the code behind it has to survive
+  /// being attacked directly rather than relying on the link staying secret.
+  failedAttempts Int       @default(0)
+  lockedUntil    DateTime?
+
+  /// Set by the student or an admin; a revoked row is kept so the same slug is
+  /// never handed out again.
+  revokedAt  DateTime?
+  lastUsedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  /// One shortcut per student per workspace — the point is a single icon.
+  @@unique([userId, organizationId])
+  @@index([organizationId])
 }
