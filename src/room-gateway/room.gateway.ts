@@ -44,6 +44,9 @@ interface SocketData {
   /** An org admin who joined in teach-mode (solo teacher): treated as the
    *  session's host for the life of this socket rather than a shadow observer. */
   teaching?: boolean;
+  /** Joined without entering presence — a shadowing admin, or a recorder. Kept
+   *  for the life of the socket so leaving can be as invisible as arriving. */
+  shadow?: boolean;
 }
 
 type RoomServer = Server<
@@ -167,6 +170,7 @@ export class RoomGateway
       // erase the presence the new socket just added, and the instructor (or a
       // student) would vanish for everyone — the "will join soon" that never
       // clears. Only the last socket out actually removes the entry.
+      if (client.data.shadow) continue;
       if (await this.userStillInRoom(sessionId, user.sub, client.id)) continue;
       await this.state.removePresence(sessionId, user.sub);
       await this.state.lowerHand(sessionId, user.sub);
@@ -223,6 +227,7 @@ export class RoomGateway
     const isRecorder = user.recorder?.sessionId === p.sessionId;
     const shadow = (isAdmin && !teaching) || isRecorder;
     client.data.teaching = teaching;
+    client.data.shadow = shadow;
     if (user.recorder && !isRecorder) {
       return this.fail(client, 'FORBIDDEN', 'Not the session this token films');
     }
@@ -350,10 +355,26 @@ export class RoomGateway
     const user = client.data.user;
     await client.leave(p.sessionId);
     client.data.sessionIds.delete(p.sessionId);
-    await this.state.removePresence(p.sessionId, user.sub);
-    await this.state.lowerHand(p.sessionId, user.sub);
-    await this.broadcastPresence(p.sessionId);
-    await this.broadcastHands(p.sessionId);
+    // The same two guards handleDisconnect has, for the same reasons — this
+    // path had neither.
+    //
+    // A shadow socket never entered presence, so it has none to remove. That
+    // matters most for a recorder, whose token names the person who pressed
+    // Record: without this, stopping a recording removed *the instructor's*
+    // presence and they vanished for every student mid-lesson.
+    //
+    // And presence is keyed by userId, so even a visible socket must not clear
+    // an entry another live socket of the same user is still holding — the
+    // second-tab case, which this path got wrong for everyone.
+    if (
+      !client.data.shadow &&
+      !(await this.userStillInRoom(p.sessionId, user.sub, client.id))
+    ) {
+      await this.state.removePresence(p.sessionId, user.sub);
+      await this.state.lowerHand(p.sessionId, user.sub);
+      await this.broadcastPresence(p.sessionId);
+      await this.broadcastHands(p.sessionId);
+    }
   }
 
   // ---------- Chat ----------

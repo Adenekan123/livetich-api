@@ -12,8 +12,14 @@ import type { JwtPayload } from '../auth/jwt-payload';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { LivekitService } from '../sessions/livekit.service';
+import { RoomStateService } from '../room-gateway/room-state.service';
 import { OBJECT_STORAGE } from '../storage/object-storage';
 import type { ObjectStorage } from '../storage/object-storage';
+import {
+  PLUGIN_CODE_INSTRUCTION,
+  PLUGIN_ISLAMIC_EDUCATION,
+  PLUGIN_TEST_PREP,
+} from '../plugins/catalog';
 import { RecorderTokenService } from './recorder-token.service';
 import { RecordingEgressService } from './recording-egress.service';
 
@@ -23,6 +29,18 @@ const PLAYBACK_URL_TTL_SECONDS = 60 * 60;
 const SHARE_PLAYBACK_TTL_SECONDS = 60 * 60 * 6;
 /** Warn in the gallery past this share of the quota. */
 export const QUOTA_WARNING_RATIO = 0.85;
+/**
+ * How long to wait for WEB_URL to answer before deciding LiveKit cannot film
+ * it.
+ *
+ * Generous on purpose. A host that is genuinely gone — a tunnel whose name died
+ * with it — fails DNS in well under a second, so this ceiling is only ever paid
+ * by a host that is alive but slow, which is exactly the case worth waiting
+ * out: a dev server behind a tunnel can spend ten seconds compiling the route
+ * on the first request, and refusing that would be a worse bug than the silent
+ * fallback this replaces.
+ */
+const RECORDER_PROBE_TIMEOUT_MS = 15_000;
 
 @Injectable()
 export class RecordingsService {
@@ -34,6 +52,7 @@ export class RecordingsService {
     private readonly livekit: LivekitService,
     private readonly config: ConfigService,
     private readonly recorderTokens: RecorderTokenService,
+    private readonly roomState: RoomStateService,
     @Inject(OBJECT_STORAGE) private readonly storage: ObjectStorage,
   ) {}
 
@@ -54,10 +73,27 @@ export class RecordingsService {
       select: {
         id: true,
         livekitRoom: true,
-        course: { select: { title: true } },
+        courseId: true,
+        course: { select: { title: true, organizationId: true } },
       },
     });
     if (!session) throw new NotFoundException('Session not found');
+
+    // Which add-on packs are on, answered here rather than looked up by the
+    // recorder itself. A recorder token is refused by /organizations/plugins —
+    // deliberately, it is scoped to one recording — and the web client swallows
+    // that failure as "no packs", which silently unmounts the surfaces those
+    // packs own. The mushaf then simply was not in the recording, with nothing
+    // anywhere saying why. The context already exists to hand this browser the
+    // things it cannot go and find; this is one of them.
+    const orgId = session.course.organizationId;
+    const packs = orgId
+      ? await this.prisma.orgPlugin.findMany({
+          where: { organizationId: orgId },
+          select: { pluginKey: true },
+        })
+      : [];
+    const enabled = new Set(packs.map((p) => p.pluginKey));
 
     const token = await this.livekit.mintJoinToken({
       room: session.livekitRoom,
@@ -73,6 +109,31 @@ export class RecordingsService {
       url: this.config.get<string>('LIVEKIT_URL') ?? null,
       room: session.livekitRoom,
       courseTitle: session.course.title,
+      courseId: session.courseId,
+      // The recorder renders the classroom itself, which needs to know who it
+      // is rendering for. This is the person who pressed Record — the same
+      // identity the token already carries, handed over rather than decoded in
+      // the browser.
+      me: { userId: user.sub, name: user.name, role: user.role },
+      // Deliberately never the host's classroom, however the recording was
+      // started. Rendering the host UI makes the page fetch what a host fetches
+      // — /quizzes among them — and those endpoints refuse a recorder token, as
+      // they should: it is scoped to one recording, not to an admin's reach.
+      // The first 401 redirected the page to /login, and the recording filmed
+      // that. The observer's classroom asks for nothing it cannot have, and its
+      // "Shadowing · hidden" badge is hidden by the recorder's own stylesheet.
+      teaching: false,
+      // Which surface the class is on, right now. The classroom's own default
+      // is the room, and it only learns better when the socket replays the
+      // real value — so a recorder that starts rendering before that replay
+      // opens on the wrong surface and the recording's first seconds show it.
+      // Handing it over with the rest of the context removes the window.
+      view: await this.roomState.getView(sessionId),
+      packs: {
+        islamicEducation: enabled.has(PLUGIN_ISLAMIC_EDUCATION),
+        codeInstruction: enabled.has(PLUGIN_CODE_INSTRUCTION),
+        testPrep: enabled.has(PLUGIN_TEST_PREP),
+      },
     };
   }
 
@@ -85,17 +146,64 @@ export class RecordingsService {
    * be worse than falling back to the camera — so it is treated as "no page"
    * and said out loud once.
    */
-  private recorderBaseUrl(): string | null {
-    const raw = this.config.get<string>('WEB_URL')?.replace(/\/+$/, '');
+  private async publicUrl(
+    key: 'WEB_URL' | 'API_PUBLIC_URL',
+  ): Promise<string | null> {
+    const raw = this.config.get<string>(key)?.replace(/\/+$/, '');
     if (!raw) return null;
     if (/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(raw)) {
       this.logger.warn(
-        `WEB_URL is ${raw}, which LiveKit cannot reach — recording the camera ` +
-          `only. Expose the web app (a tunnel is enough) to record the whole class.`,
+        `${key} is ${raw}, which LiveKit cannot reach — it can only record the ` +
+          `camera. Expose it (a tunnel is enough) to record the whole class.`,
       );
       return null;
     }
-    return raw;
+    // A hostname that worked once is not one that works now. A quick tunnel's
+    // name dies with the tunnel while the URL stays in .env, and egress then
+    // films an error page — exactly as blank as filming nothing. So ask the
+    // host rather than believing the string.
+    //
+    // An HTTP answer is not on its own good news. A tunnel whose process is
+    // gone still resolves and still answers: Cloudflare returns 530 ("origin
+    // unreachable") for a good while before the name itself goes away, and a
+    // proxy with nothing behind it answers 502/504. Those are the shapes this
+    // check exists to catch, so anything 5xx counts as down. Below that — a
+    // 200, a redirect, even a 401 — something is serving, which is all that is
+    // in question here.
+    try {
+      const res = await fetch(raw, {
+        method: 'GET',
+        redirect: 'manual',
+        signal: AbortSignal.timeout(RECORDER_PROBE_TIMEOUT_MS),
+      });
+      if (res.status >= 500) {
+        this.logger.warn(
+          `${key} is ${raw}, which answered ${res.status} — nothing is serving ` +
+            `behind it (a tunnel that has stopped answers this way).`,
+        );
+        return null;
+      }
+      return raw;
+    } catch (e) {
+      this.logger.warn(
+        `${key} is ${raw}, which did not answer within ` +
+          `${RECORDER_PROBE_TIMEOUT_MS}ms (${e instanceof Error ? e.message : e}) — ` +
+          `LiveKit cannot film a page it cannot load.`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Whether an operator has accepted camera-only recordings for this
+   * deployment. Off by default: the surprise is the problem, not the mode.
+   */
+  private cameraOnlyAllowed(): boolean {
+    return (
+      (this.config.get<string>('RECORDING_ALLOW_CAMERA_ONLY') ?? '')
+        .trim()
+        .toLowerCase() === 'true'
+    );
   }
 
   /** Only staff record or manage recordings; students never see the gallery. */
@@ -176,12 +284,40 @@ export class RecordingsService {
     if (running)
       throw new BadRequestException('This class is already recording');
 
+    // Both halves matter. The page is useless without the API: it opens, every
+    // fetch and socket fails, and it renders a full-screen error — which films
+    // as a black rectangle just as convincingly as no page at all. So the API's
+    // own public URL is checked with the same suspicion as the web app's.
+    const [webBase, apiBase] = await Promise.all([
+      this.publicUrl('WEB_URL'),
+      this.publicUrl('API_PUBLIC_URL'),
+    ]);
+    const recorderBase = webBase && apiBase ? webBase : null;
+    // Falling back to the room is how a lesson gets recorded as a black
+    // rectangle: a room composite films published tracks, so the board, the
+    // mushaf and the shared media are all absent by construction, and with
+    // every camera off there is nothing left to draw. That is worse than no
+    // recording, because it looks like one until someone watches it. Refuse,
+    // and name the thing to fix — unless an operator has explicitly said the
+    // camera alone is worth having here.
+    if (!recorderBase && !this.cameraOnlyAllowed()) {
+      const missing = [
+        webBase ? null : 'WEB_URL',
+        apiBase ? null : 'API_PUBLIC_URL',
+      ]
+        .filter(Boolean)
+        .join(' and ');
+      throw new BadRequestException(
+        `Recording the class needs ${missing} to be reachable from the internet. ` +
+          'Point it at a public URL (a tunnel is enough) and try again — otherwise ' +
+          'the recording would hold no board, no mushaf and no shared media.',
+      );
+    }
     // Only when we are filming the room itself. Recording the page has
     // something to show either way — a hifz lesson on the mushaf with every
     // camera off is a perfectly good recording — whereas a room composite
     // pointed at a room with nothing published waits a minute and then dies
     // with an error the instructor cannot act on.
-    const recorderBase = this.recorderBaseUrl();
     if (
       !recorderBase &&
       !(await this.egress.hasPublisher(session.livekitRoom))
@@ -190,6 +326,13 @@ export class RecordingsService {
         'Turn on your camera or microphone before recording — there is nothing to record yet.',
       );
     }
+
+    // The workspace's recording settings: what it may store, how it encodes,
+    // and how long one recording may run.
+    const org = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: { recordingQuality: true, maxRecordingMinutes: true },
+    });
 
     const { full } = await this.usage(organizationId);
     if (full) {
@@ -218,13 +361,14 @@ export class RecordingsService {
               recordingId: recording.id,
               startedById: user.sub,
             }),
-          )}`
+          )}&api=${encodeURIComponent(apiBase!)}`
         : undefined;
       const { egressId, storageKey } = await this.egress.start({
         room: session.livekitRoom,
         organizationId,
         recordingId: recording.id,
         recorderUrl,
+        quality: org?.recordingQuality,
       });
       return this.prisma.recording.update({
         where: { id: recording.id },
@@ -493,6 +637,102 @@ export class RecordingsService {
     }
     await this.prisma.recording.delete({ where: { id } });
     return { deleted: true };
+  }
+
+  /**
+   * Delete a recording's bytes, whoever is asking.
+   *
+   * Extracted from `remove` so the retention sweep deletes exactly what a
+   * person deleting by hand would — including the legacy manifest, which is
+   * named after the egress and is unfindable once the row is gone.
+   */
+  private async purgeStoredObjects(recording: {
+    organizationId: string;
+    storageKey: string | null;
+    egressId: string | null;
+  }): Promise<void> {
+    if (recording.storageKey) {
+      await this.storage.delete(recording.storageKey).catch((e) => {
+        this.logger.error(
+          `Could not delete ${recording.storageKey}: ${String(e)}`,
+        );
+      });
+    }
+    if (recording.egressId) {
+      const manifest = this.egress.legacyManifestKey(
+        recording.organizationId,
+        recording.egressId,
+      );
+      await this.storage.delete(manifest).catch(() => {
+        // Almost always simply absent, which is the expected case now.
+      });
+    }
+  }
+
+  /**
+   * Remove recordings that have outlived their workspace's retention window.
+   *
+   * A quota alone only postpones the problem: storage is a stock, not a flow,
+   * so without an expiry every workspace grows until it hits its ceiling and
+   * the only way forward is asking a paying customer to delete their lessons.
+   * An expiry makes the steady-state size predictable.
+   *
+   * Deliberately conservative:
+   *  - a workspace with no retention set (null) is left entirely alone,
+   *  - a recording still being made is never touched, however old its row,
+   *  - the bytes go before the row, since an object with no row is invisible
+   *    and sweepable whereas a row with no object is a broken gallery entry,
+   *  - and the batch is capped, so one very old workspace cannot turn a single
+   *    tick into thousands of storage calls.
+   */
+  async sweepExpiredRecordings(limit = 100): Promise<number> {
+    const orgs = await this.prisma.organization.findMany({
+      where: { recordingRetentionDays: { not: null } },
+      select: { id: true, recordingRetentionDays: true },
+    });
+
+    let deleted = 0;
+    for (const org of orgs) {
+      const days = org.recordingRetentionDays;
+      if (!days || days <= 0) continue;
+      const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+      const expired = await this.prisma.recording.findMany({
+        where: {
+          organizationId: org.id,
+          createdAt: { lt: cutoff },
+          status: {
+            notIn: [RecordingStatus.STARTING, RecordingStatus.RECORDING],
+          },
+        },
+        select: {
+          id: true,
+          organizationId: true,
+          storageKey: true,
+          egressId: true,
+          createdAt: true,
+        },
+        take: Math.max(1, limit - deleted),
+      });
+      for (const recording of expired) {
+        try {
+          await this.purgeStoredObjects(recording);
+          await this.prisma.recording.delete({ where: { id: recording.id } });
+          deleted++;
+          this.logger.log(
+            `Recording ${recording.id} deleted: older than ${days}d ` +
+              `(made ${recording.createdAt.toISOString()})`,
+          );
+        } catch (e) {
+          // Leave it for the next sweep rather than abandoning the batch.
+          this.logger.warn(
+            `Could not sweep recording ${recording.id}: ` +
+              `${e instanceof Error ? e.message : e}`,
+          );
+        }
+      }
+      if (deleted >= limit) break;
+    }
+    return deleted;
   }
 
   /**

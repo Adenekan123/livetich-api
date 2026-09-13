@@ -152,9 +152,14 @@ export class RecordingEgressService {
    * Chosen with RECORDING_QUALITY; anything unrecognised falls back to
    * balanced rather than failing a recording over a typo in the environment.
    */
-  private encodingOptions(): EncodingOptions {
+  private encodingOptions(preferred?: string | null): EncodingOptions {
+    // The workspace decides; RECORDING_QUALITY is the deployment-wide default
+    // for anything that has not, and balanced is the floor under both. A free
+    // tier can record at half the size without changing what anyone else gets.
     const name = (
-      this.config.get<string>('RECORDING_QUALITY') ?? 'balanced'
+      preferred ??
+      this.config.get<string>('RECORDING_QUALITY') ??
+      'balanced'
     ).toLowerCase();
     const preset = QUALITY[name as QualityName] ?? QUALITY.balanced;
     if (!(name in QUALITY)) {
@@ -249,6 +254,8 @@ export class RecordingEgressService {
      * of only the room's tracks.
      */
     recorderUrl?: string;
+    /** The workspace's encoding preset; falls back to the deployment default. */
+    quality?: string | null;
   }): Promise<{ egressId: string; storageKey: string }> {
     if (!this.isConfigured) {
       throw new ServiceUnavailableException(
@@ -282,24 +289,37 @@ export class RecordingEgressService {
       },
     });
 
-    // Recording the page captures the lesson; recording the room captures only
-    // the people in it. The second is the fallback for a deployment whose web
-    // app LiveKit cannot reach — see WEB_URL — because a recording of the
-    // camera alone still beats no recording at all.
-    const info = opts.recorderUrl
-      ? await this.client().startWebEgress(opts.recorderUrl, output, {
-          encodingOptions: this.encodingOptions(),
-          // The page says when it has the board and the room, so egress never
-          // films the loading state. This is the same START_RECORDING signal
-          // whose absence shows up as "Start signal not received".
-          awaitStartSignal: true,
-        })
-      : await this.client().startRoomCompositeEgress(opts.room, output, {
-          // The grid layout follows whoever is speaking, which for a class is
-          // the instructor almost all of the time.
-          layout: 'speaker',
-          encodingOptions: this.encodingOptions(),
-        });
+    // Always a room composite — the difference is only what it draws.
+    //
+    // With a recorder page it is used as the composite's template, so the
+    // picture is our classroom (board, mushaf, faces, chat) while LiveKit mixes
+    // the audio from the room server-side. Without one it falls back to
+    // LiveKit's speaker layout, which follows whoever is talking.
+    //
+    // It is worth being explicit about why this is not a web egress, since that
+    // is the obvious choice for "record this URL". A web egress records the
+    // browser's own speakers, so the page has to actually be playing the audio
+    // — and a browser will not play sound until the page has seen a real user
+    // gesture. Nothing ever clicks a recorder, so nothing ever cleared that,
+    // and every web egress came out with a perfectly good video track and an
+    // audio track containing pure digital silence. No in-page code can fix it;
+    // startAudio() needs the same gesture. Mixing at the server never involves
+    // a browser's audio output at all, so the question cannot arise.
+    //
+    // The cost is `awaitStartSignal`, which is web-egress only: the composite
+    // starts filming when it starts, so the first seconds can catch the page
+    // still assembling itself. A couple of seconds of loading state is a much
+    // smaller problem than a silent lesson.
+    const info = await this.client().startRoomCompositeEgress(
+      opts.room,
+      output,
+      {
+        encodingOptions: this.encodingOptions(opts.quality),
+        ...(opts.recorderUrl
+          ? { customBaseUrl: opts.recorderUrl }
+          : { layout: 'speaker' }),
+      },
+    );
     this.logger.log(
       `Recording ${opts.recordingId} started (egress ${info.egressId}, ` +
         `${opts.recorderUrl ? 'whole class' : 'camera only'}) -> ${storageKey}`,
