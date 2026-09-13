@@ -763,15 +763,49 @@ export class CoursesService {
     return rows;
   }
 
-  listEnrolled(studentId: string) {
-    return this.prisma.enrollment.findMany({
+  /**
+   * A student's enrolments, each carrying whether its class is live right now
+   * and when the next one is.
+   *
+   * Derived the same way the catalog derives it, deliberately — "live" has to
+   * mean one thing across the product, or a student is told a class is running
+   * on one screen and not on another. It is the shortcut's home screen that
+   * needs this: without it a student can see their programs but not which one
+   * to walk into, which is the only question they are actually asking.
+   */
+  async listEnrolled(studentId: string) {
+    const enrollments = await this.prisma.enrollment.findMany({
       where: { studentId },
       include: {
         course: {
-          include: { instructor: { select: { id: true, name: true } } },
+          include: {
+            instructor: { select: { id: true, name: true } },
+            sessions: {
+              where: {
+                status: { in: [SessionStatus.LIVE, SessionStatus.SCHEDULED] },
+              },
+              select: { id: true, status: true, scheduledAt: true },
+            },
+          },
         },
       },
       orderBy: { createdAt: 'desc' },
+    });
+
+    return enrollments.map((e) => {
+      const { sessions, ...course } = e.course;
+      const live = sessions.find((s) => s.status === SessionStatus.LIVE);
+      const next = sessions
+        .filter((s) => s.status === SessionStatus.SCHEDULED)
+        .sort((a, b) => +a.scheduledAt - +b.scheduledAt)[0];
+      return {
+        ...e,
+        course: {
+          ...course,
+          liveSessionId: live?.id ?? null,
+          nextSessionAt: next?.scheduledAt ?? null,
+        },
+      };
     });
   }
 
