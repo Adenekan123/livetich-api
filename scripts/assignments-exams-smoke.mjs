@@ -8,9 +8,10 @@
  *
  * Covers, for both surfaces: the full lifecycle (author -> student sees ->
  * submits -> manager marks -> student sees the mark), org isolation, role
- * separation, and the two things worth being paranoid about — that a grade
+ * separation, and the three things worth being paranoid about — that a grade
  * cannot exceed the assignment's own maxPoints (it is worth leaderboard
- * points), and that an exam's answer key never ships with the attempt.
+ * points), that an exam's answer key never ships with the attempt, and that an
+ * exam is one sitting per student while a dropped connection still resumes.
  */
 const API = 'http://localhost:3000';
 const setup = JSON.parse(process.argv[2] ?? '{}');
@@ -231,10 +232,25 @@ check(
   `status ${foreignRes.status}`,
 );
 
+// One sitting each: a student who has submitted cannot start again.
 const again = await req('POST', `/exams/${exId}/attempts`, ST);
-console.log(
-  `NOTE  second attempt -> ${again.status} ${JSON.stringify(again.body)?.slice(0, 140)}`,
-);
+check('a second sitting is refused', again.status === 409,
+  `status ${again.status} -> ${JSON.stringify(again.body)?.slice(0, 140)}`);
+
+// ...but resuming an unsubmitted attempt is not a second sitting. A student
+// whose tab died must get the same attempt back, on the original clock.
+const ex2 = await req('POST', `/courses/${course}/exams`, IT, {
+  title: 'E2E: resume check', durationMinutes: 30, questions,
+});
+const openA = await req('POST', `/exams/${ex2.body?.id}/attempts`, ST);
+const openB = await req('POST', `/exams/${ex2.body?.id}/attempts`, ST);
+check('an unsubmitted attempt resumes rather than restarting',
+  openB.status === 200 && openB.body?.attemptId === openA.body?.attemptId,
+  `${openA.body?.attemptId} vs ${openB.body?.attemptId}`);
+check('resuming keeps the original deadline',
+  openB.body?.deadline === openA.body?.deadline,
+  `${openA.body?.deadline} vs ${openB.body?.deadline}`);
+await req('DELETE', `/courses/${course}/exams/${ex2.body?.id}`, IT);
 
 const upd = await req('PATCH', `/courses/${course}/exams/${exId}`, IT, { title: 'E2E: renamed' });
 check('instructor edits the exam', upd.status === 200, `status ${upd.status}`);
