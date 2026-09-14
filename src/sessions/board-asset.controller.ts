@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  Body,
   Controller,
   ForbiddenException,
   Get,
@@ -18,6 +19,7 @@ import { randomUUID } from 'node:crypto';
 import { CurrentUser } from '../auth/current-user.decorator';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { PrismaService } from '../prisma/prisma.service';
+import { googleExportUrl } from './google-export';
 import { OBJECT_STORAGE } from '../storage/object-storage';
 import type { ObjectStorage } from '../storage/object-storage';
 
@@ -79,6 +81,68 @@ export class BoardAssetController {
       'text/plain',
     );
     return { url: `/api/files/board-asset/${id}` };
+  }
+
+  /**
+   * Fetch a Google file as PDF, so its pages can go on the board.
+   *
+   * An embedded Google file is a sealed iframe: it cannot be scrolled in step
+   * for the class, drawn on, or edited. Rasterising its pages onto the board
+   * trades live updates for the two things a lesson needs — everyone on the
+   * same page, and room to write over it.
+   *
+   * Server-side because Google sends no CORS headers, so the browser cannot
+   * make this request at all. The bytes are handed straight back rather than
+   * stored: the page images the client produces are what get uploaded, and
+   * keeping the source PDF as well would be a second copy of every import.
+   */
+  @Post('sessions/:id/board-google-import')
+  async googleImport(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') sessionId: string,
+    @Body() body: { url?: string },
+  ) {
+    const link = (body?.url ?? '').trim();
+    if (!link) throw new BadRequestException('No link received');
+    const exportUrl = googleExportUrl(link);
+    if (!exportUrl) {
+      throw new BadRequestException(
+        'That link cannot be imported. Use a Google Doc, Sheet, Slides or Drive file.',
+      );
+    }
+    await this.assertParticipant(user, sessionId);
+
+    let res: Response;
+    try {
+      res = await fetch(exportUrl, {
+        redirect: 'follow',
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch {
+      throw new BadRequestException('Google did not answer. Try again.');
+    }
+    if (!res.ok) {
+      throw new BadRequestException(
+        `Google refused that file (${res.status}). Check it is shared with "anyone with the link".`,
+      );
+    }
+
+    // A file that is not shared does not fail — Google answers 200 with a
+    // sign-in page. The content type is the only thing that tells them apart.
+    const type = res.headers.get('content-type') ?? '';
+    if (!type.includes('application/pdf')) {
+      throw new BadRequestException(
+        'That file is not shared. Set it to "anyone with the link" in Google, then try again.',
+      );
+    }
+
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.byteLength > MAX_ASSET_BYTES) {
+      throw new BadRequestException(
+        'That file is larger than 20 MB. Import it in parts.',
+      );
+    }
+    return new StreamableFile(buf, { type: 'application/pdf' });
   }
 
   /**
