@@ -25,8 +25,16 @@ import type {
   RoomScheme,
   RoomUser,
   ServerToClientEvents,
+  TajweedTemporaryAnnotation,
 } from '../shared';
 import { ROOM_SCHEMES } from '../shared';
+import { validateSelection } from '../quran/quran-words';
+import {
+  ANNOTATION_ID,
+  cleanText,
+  HEX_COLOR,
+  isTajweedRule,
+} from '../tajweed/tajweed-input';
 import { RoomStateService } from './room-state.service';
 import { RoomBroadcaster, staffRoom } from '../realtime/room-broadcaster';
 import { PluginsService } from '../plugins/plugins.service';
@@ -307,6 +315,9 @@ export class RoomGateway
       }
       const pos = await this.state.getQuranPos(p.sessionId);
       client.emit('quran:position', { sessionId: p.sessionId, ...pos });
+      // Whatever the instructor is pointing at right now, so a late joiner
+      // sees the same marked words as everyone else.
+      await this.sendTajweedTemporary(p.sessionId, client);
     }
     await this.broadcastHands(p.sessionId, client);
     await this.broadcastSpeakers(p.sessionId, client);
@@ -522,6 +533,96 @@ export class RoomGateway
     this.server
       .to(p.sessionId)
       .emit('quran:position', { sessionId: p.sessionId, ...pos });
+  }
+
+  // ---------- Live Tajweed annotations ----------
+
+  /**
+   * Show a live annotation to the room.
+   *
+   * Live annotations are for teaching in the moment: they sit in the session's
+   * Redis state and never reach the database unless the instructor saves one
+   * to the lesson over HTTP. They are held to the same checks as a saved one —
+   * the reference must exist in the Qur'an, the rule must be known, the note is
+   * plain text — because every student's screen renders what is sent here.
+   */
+  @SubscribeMessage('tajweed:temporary:set')
+  async onTajweedTemporarySet(
+    @ConnectedSocket() client: RoomSocket,
+    @MessageBody()
+    p: {
+      sessionId: string;
+      annotation: Omit<TajweedTemporaryAnnotation, 'expiresAt'> & { ttlSec?: number };
+    },
+  ) {
+    const session = await this.ownedSession(client, p.sessionId);
+    if (!session) return;
+    if (
+      !(await this.plugins.isEnabled(
+        session.course.organizationId,
+        PLUGIN_ISLAMIC_EDUCATION,
+      ))
+    ) {
+      return this.fail(client, 'PLUGIN_DISABLED', 'Add-on not enabled');
+    }
+    const a = p.annotation;
+    if (!a || typeof a.id !== 'string' || !ANNOTATION_ID.test(a.id)) {
+      return this.fail(client, 'BAD_REQUEST', 'Invalid annotation id');
+    }
+    if (!isTajweedRule(a.rule)) {
+      return this.fail(client, 'BAD_REQUEST', 'Unknown Tajweed rule');
+    }
+    let ref;
+    try {
+      ref = validateSelection(a);
+    } catch (e) {
+      return this.fail(client, 'BAD_REQUEST', (e as Error).message);
+    }
+    const customLabel = cleanText(a.customLabel, 60);
+    if (a.rule === 'custom' && !customLabel) {
+      return this.fail(client, 'BAD_REQUEST', 'Give the custom note a label');
+    }
+    const ttlSec = Math.min(3600, Math.max(0, Math.trunc(Number(a.ttlSec) || 0)));
+    const annotation: TajweedTemporaryAnnotation = {
+      id: a.id,
+      ...ref,
+      rule: a.rule,
+      customLabel,
+      style: a.style === 'UNDERLINE' ? 'UNDERLINE' : 'HIGHLIGHT',
+      color: typeof a.color === 'string' && HEX_COLOR.test(a.color) ? a.color : null,
+      note: cleanText(a.note, 1000),
+      expiresAt: ttlSec ? new Date(Date.now() + ttlSec * 1000).toISOString() : null,
+    };
+    if (!(await this.state.setTajweedTemporary(p.sessionId, annotation))) {
+      return this.fail(
+        client,
+        'LIMIT',
+        'Too many live annotations — clear some before adding more',
+      );
+    }
+    await this.sendTajweedTemporary(p.sessionId);
+  }
+
+  /** Clear one live annotation, or all of them. */
+  @SubscribeMessage('tajweed:temporary:clear')
+  async onTajweedTemporaryClear(
+    @ConnectedSocket() client: RoomSocket,
+    @MessageBody() p: { sessionId: string; id?: string },
+  ) {
+    if (!(await this.isOwner(client, p.sessionId))) return;
+    const id = typeof p.id === 'string' && ANNOTATION_ID.test(p.id) ? p.id : undefined;
+    await this.state.clearTajweedTemporary(p.sessionId, id);
+    await this.sendTajweedTemporary(p.sessionId);
+  }
+
+  /** The full live list — to one joining client, or to the whole room. */
+  private async sendTajweedTemporary(sessionId: string, client?: RoomSocket) {
+    const payload = {
+      sessionId,
+      annotations: await this.state.listTajweedTemporary(sessionId),
+    };
+    if (client) client.emit('tajweed:temporary', payload);
+    else this.server.to(sessionId).emit('tajweed:temporary', payload);
   }
 
   // ---------- Raised hands ----------

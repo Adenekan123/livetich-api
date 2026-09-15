@@ -131,6 +131,7 @@ model Organization {
   orgPlugins    OrgPlugin[]
   recordings    Recording[]
   quickAccesses QuickAccess[]
+  tajweedAnnotations TajweedAnnotation[]
 }
 
 /// An enabled add-on pack for a tenant. The catalog of pluginKeys lives in code
@@ -228,6 +229,9 @@ model User {
   codingFeedback           CodingFeedback[]      @relation("codingFeedbackAuthor")
   recordingsStarted        Recording[]
   quickAccesses            QuickAccess[]
+  tajweedCorrections       TajweedAnnotation[]   @relation("tajweedStudent")
+  tajweedCreated           TajweedAnnotation[]   @relation("tajweedCreator")
+  tajweedUpdated           TajweedAnnotation[]   @relation("tajweedUpdater")
 
   @@index([organizationId])
 }
@@ -313,6 +317,7 @@ model Course {
   exams               Exam[]
   codingAssignments   CodingAssignment[]
   recordings          Recording[]
+  tajweedAnnotations  TajweedAnnotation[]
 
   @@index([instructorId])
   @@index([organizationId])
@@ -332,6 +337,7 @@ model Section {
   assignments         Assignment[]
   assessmentQuestions AssessmentQuestion[]
   remediationTasks    RemediationTask[]
+  tajweedAnnotations  TajweedAnnotation[]
 
   @@unique([courseId, order])
 }
@@ -448,6 +454,7 @@ model LiveSession {
   assignments       Assignment[]
   hifzEntries       HifzEntry[]
   codingAssignments CodingAssignment[]
+  tajweedAnnotations TajweedAnnotation[]
 
   @@index([courseId, status])
 }
@@ -808,10 +815,127 @@ model HifzEntry {
   student    User         @relation("hifzEntryStudent", fields: [studentId], references: [id])
   recordedBy User         @relation("hifzEntryRecorder", fields: [recordedById], references: [id])
   session    LiveSession? @relation(fields: [sessionId], references: [id])
+  tajweedCorrections TajweedAnnotation[]
 
   @@index([courseId, studentId])
   @@index([studentId])
   @@index([sessionId])
+}
+
+// ===================== Tajweed (Islamic Education pack) =====================
+// Annotations point INTO the canonical Qur'an text (src/quran) by surah, ayah,
+// word position and letter (grapheme) position — they never store a copy of
+// the Arabic, so the text cannot drift from its source. See quran-words.ts.
+
+/// How much of an ayah an annotation covers.
+enum TajweedSelection {
+  AYAH
+  WORD
+  LETTERS
+}
+
+/// How an annotation is drawn. A colour, when set, overrides the rule's default.
+enum TajweedAnnotationStyle {
+  HIGHLIGHT
+  UNDERLINE
+}
+
+/// LESSON: prepared teaching material, restored whenever its lesson is opened.
+/// STUDENT_CORRECTION: feedback on one student's recitation.
+/// Live, temporary annotations are deliberately not a mode: they are never
+/// stored here, only in the session's Redis state (see RoomStateService).
+enum TajweedAnnotationMode {
+  LESSON
+  STUDENT_CORRECTION
+}
+
+/// What the teacher heard, for a correction.
+enum TajweedOutcome {
+  CORRECT
+  REPEAT
+  TAJWEED_ISSUE
+  PRONUNCIATION
+  NOTE
+}
+
+model TajweedAnnotation {
+  /// Chosen by the client, so a create resent after a dropped connection finds
+  /// the row it already made instead of making a second one.
+  id             String                 @id @db.VarChar(64)
+  organizationId String
+  courseId       String
+  /// The lesson it belongs to. Null for an annotation made in a session that
+  /// has no section, which then belongs to that session.
+  sectionId      String?
+  /// The live session it was made in, if any.
+  sessionId      String?
+  mode           TajweedAnnotationMode
+  /// STUDENT_CORRECTION only.
+  studentId      String?
+  /// The recitation a correction was heard in, when one was logged.
+  hifzEntryId    String?
+  surahNumber    Int
+  ayahNumber     Int
+  selection      TajweedSelection
+  /// 0-based word positions in the ayah, ends inclusive. Null for AYAH.
+  wordStart      Int?
+  wordEnd        Int?
+  /// 0-based letter positions within one word, ends inclusive. LETTERS only.
+  letterStart    Int?
+  letterEnd      Int?
+  /// A key of TAJWEED_RULES (src/shared). A string rather than an enum so a new
+  /// rule needs no migration. Null only for a correction with no rule attached.
+  rule           String?                @db.VarChar(32)
+  customLabel    String?                @db.VarChar(60)
+  style          TajweedAnnotationStyle @default(HIGHLIGHT)
+  /// #rrggbb, the teacher's own colour.
+  color          String?                @db.VarChar(7)
+  /// Plain text. Tags are stripped on the way in; it is never rendered as HTML.
+  note           String?                @db.Text
+  outcome        TajweedOutcome?
+  /// Bumped on every edit. An edit based on an older version is refused, so a
+  /// reconnecting client cannot overwrite a newer change.
+  version        Int                    @default(1)
+  createdById    String
+  updatedById    String
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  course       Course       @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  section      Section?     @relation(fields: [sectionId], references: [id], onDelete: SetNull)
+  session      LiveSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  student      User?        @relation("tajweedStudent", fields: [studentId], references: [id])
+  hifzEntry    HifzEntry?   @relation(fields: [hifzEntryId], references: [id], onDelete: SetNull)
+  createdBy    User         @relation("tajweedCreator", fields: [createdById], references: [id])
+  updatedBy    User         @relation("tajweedUpdater", fields: [updatedById], references: [id])
+
+  @@index([courseId, sectionId])
+  @@index([courseId, studentId])
+  @@index([sessionId])
+  @@index([organizationId, createdAt])
+}
+
+enum TajweedChange {
+  CREATED
+  UPDATED
+  DELETED
+}
+
+/// Minimal change history. No foreign key to the annotation on purpose: the
+/// history has to outlive a deletion, which is exactly when a student
+/// correction's record matters most.
+model TajweedAnnotationRevision {
+  id           String        @id @default(cuid())
+  annotationId String        @db.VarChar(64)
+  version      Int
+  change       TajweedChange
+  /// The annotation as it stood after this change (as it was, for a deletion).
+  snapshot     Json
+  changedById  String
+  changedAt    DateTime      @default(now())
+
+  @@index([annotationId])
 }
 
 // ===================== Test Prep (add-on pack: test-prep) =====================

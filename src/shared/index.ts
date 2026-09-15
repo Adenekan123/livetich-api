@@ -96,6 +96,86 @@ export interface BuzzerState {
   winner?: RoomUser;
 }
 
+// ---------- Tajweed (Islamic Education pack) ----------
+
+/**
+ * The Tajweed rules an annotation can carry. Data, not buttons: the toolbar is
+ * built from this, so adding a rule is one entry here plus its default style on
+ * the web side. Colours are not part of the rule — Tajweed mushafs do not agree
+ * on one scheme, so the web holds only suggestions and the teacher can change
+ * them.
+ */
+export const TAJWEED_RULES = {
+  madd: { label: 'Madd', description: 'Elongation' },
+  ghunnah: { label: 'Ghunnah', description: 'Nasalization' },
+  ikhfa: { label: 'Ikhfa', description: 'Concealing noon sakinah or tanween' },
+  idgham: { label: 'Idgham', description: 'Merging into the next letter' },
+  iqlab: { label: 'Iqlab', description: 'Noon sakinah or tanween becomes meem before baa' },
+  izhar: { label: 'Izhar', description: 'Pronouncing clearly' },
+  qalqalah: { label: 'Qalqalah', description: 'The echoing bounce of ق ط ب ج د' },
+  waqf: { label: 'Waqf', description: 'Stopping' },
+  custom: { label: 'Custom note', description: 'A label of your own' },
+} as const;
+export type TajweedRule = keyof typeof TAJWEED_RULES;
+export const TAJWEED_RULE_KEYS = Object.keys(TAJWEED_RULES) as TajweedRule[];
+
+export type TajweedSelection = 'AYAH' | 'WORD' | 'LETTERS';
+export type TajweedAnnotationStyle = 'HIGHLIGHT' | 'UNDERLINE';
+export type TajweedAnnotationMode = 'LESSON' | 'STUDENT_CORRECTION';
+export type TajweedOutcome =
+  | 'CORRECT'
+  | 'REPEAT'
+  | 'TAJWEED_ISSUE'
+  | 'PRONUNCIATION'
+  | 'NOTE';
+
+/** Where in the canonical text an annotation points. Positions are 0-based
+ *  with inclusive ends; letters are grapheme clusters, never string indices. */
+export interface TajweedRef {
+  surahNumber: number;
+  ayahNumber: number;
+  selection: TajweedSelection;
+  wordStart: number | null;
+  wordEnd: number | null;
+  letterStart: number | null;
+  letterEnd: number | null;
+}
+
+/** A saved annotation, as the API returns it and the room broadcasts it. */
+export interface TajweedAnnotation extends TajweedRef {
+  id: string;
+  courseId: string;
+  sectionId: string | null;
+  sessionId: string | null;
+  mode: TajweedAnnotationMode;
+  studentId: string | null;
+  hifzEntryId: string | null;
+  rule: TajweedRule | null;
+  customLabel: string | null;
+  style: TajweedAnnotationStyle;
+  color: string | null;
+  note: string | null;
+  outcome: TajweedOutcome | null;
+  version: number;
+  createdById: string;
+  updatedById: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A live annotation: shown to the room while teaching and never stored in the
+ *  database. "Save to lesson" turns it into a TajweedAnnotation over HTTP. */
+export interface TajweedTemporaryAnnotation extends TajweedRef {
+  id: string;
+  rule: TajweedRule;
+  customLabel: string | null;
+  style: TajweedAnnotationStyle;
+  color: string | null;
+  note: string | null;
+  /** Server time it disappears (ISO), or null to stay until cleared. */
+  expiresAt: string | null;
+}
+
 // ---------- Socket events ----------
 
 export interface ClientToServerEvents {
@@ -136,6 +216,16 @@ export interface ClientToServerEvents {
     surah: number;
     ayah: number;
   }) => void;
+  /** Instructor shows (or replaces) a live Tajweed annotation for the room.
+   *  ttlSec > 0 makes it disappear on its own (max one hour). */
+  'tajweed:temporary:set': (p: {
+    sessionId: string;
+    annotation: Omit<TajweedTemporaryAnnotation, 'expiresAt'> & {
+      ttlSec?: number;
+    };
+  }) => void;
+  /** Instructor clears one live annotation, or all of them when id is absent. */
+  'tajweed:temporary:clear': (p: { sessionId: string; id?: string }) => void;
 }
 
 export interface ServerToClientEvents {
@@ -162,6 +252,28 @@ export interface ServerToClientEvents {
     sessionId: string;
     surah: number;
     ayah: number;
+  }) => void;
+
+  /** A saved Tajweed annotation changed in this session. Lesson annotations go
+   *  to the whole room; student corrections to staff only. */
+  'tajweed:annotation:created': (p: {
+    sessionId: string;
+    annotation: TajweedAnnotation;
+  }) => void;
+  'tajweed:annotation:updated': (p: {
+    sessionId: string;
+    annotation: TajweedAnnotation;
+  }) => void;
+  'tajweed:annotation:deleted': (p: {
+    sessionId: string;
+    id: string;
+    mode: TajweedAnnotationMode;
+  }) => void;
+  /** Every live annotation in the session — sent on join and on each change,
+   *  so a client only ever replaces its list and never has to merge. */
+  'tajweed:temporary': (p: {
+    sessionId: string;
+    annotations: TajweedTemporaryAnnotation[];
   }) => void;
 
   'leaderboard:update': (p: {

@@ -6,6 +6,7 @@ import type {
   RoomScheme,
   RoomUser,
   StageView,
+  TajweedTemporaryAnnotation,
 } from '../shared';
 import { ROOM_SCHEMES } from '../shared';
 import { REDIS } from '../redis/redis.module';
@@ -107,6 +108,61 @@ export class RoomStateService {
    *  from the last recitation once, and never stomp the instructor's live page. */
   async hasQuranPos(sessionId: string): Promise<boolean> {
     return (await this.redis.exists(this.k(sessionId, 'quran'))) === 1;
+  }
+
+  // ---------- Live Tajweed annotations (instructor-driven, never persisted) ----------
+
+  /** A ceiling on live annotations per session, so a runaway client cannot
+   *  grow the hash — and every join payload — without bound. */
+  private static readonly TAJWEED_LIVE_MAX = 50;
+
+  /** Show or replace one live annotation. False when the session is already at
+   *  the ceiling and this would be a new one. */
+  async setTajweedTemporary(
+    sessionId: string,
+    annotation: TajweedTemporaryAnnotation,
+  ): Promise<boolean> {
+    const key = this.k(sessionId, 'tajweed');
+    const exists = await this.redis.hexists(key, annotation.id);
+    if (!exists && (await this.redis.hlen(key)) >= RoomStateService.TAJWEED_LIVE_MAX) {
+      return false;
+    }
+    await this.redis.hset(key, annotation.id, JSON.stringify(annotation));
+    await this.redis.expire(key, RoomStateService.TTL);
+    return true;
+  }
+
+  /** Clear one live annotation, or every one when no id is given. */
+  async clearTajweedTemporary(sessionId: string, id?: string) {
+    const key = this.k(sessionId, 'tajweed');
+    if (id) await this.redis.hdel(key, id);
+    else await this.redis.del(key);
+  }
+
+  /**
+   * The session's live annotations, minus any that have run out.
+   *
+   * Expiry is judged when the list is read rather than by a timer, so it holds
+   * with any number of gateway instances and survives a restart. Clients hide
+   * an annotation at its expiresAt on their own; this is what keeps a late
+   * joiner from being sent one that has already gone.
+   */
+  async listTajweedTemporary(sessionId: string): Promise<TajweedTemporaryAnnotation[]> {
+    const key = this.k(sessionId, 'tajweed');
+    const raw = await this.redis.hgetall(key);
+    const now = Date.now();
+    const live: TajweedTemporaryAnnotation[] = [];
+    const expired: string[] = [];
+    for (const [id, json] of Object.entries(raw)) {
+      const annotation = JSON.parse(json) as TajweedTemporaryAnnotation;
+      if (annotation.expiresAt && Date.parse(annotation.expiresAt) <= now) {
+        expired.push(id);
+      } else {
+        live.push(annotation);
+      }
+    }
+    if (expired.length) await this.redis.hdel(key, ...expired);
+    return live;
   }
 
   // ---------- Raised hands ----------

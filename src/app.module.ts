@@ -19,6 +19,7 @@ import { CoursesModule } from './courses/courses.module';
 import { QuranModule } from './quran/quran.module';
 import { GroupsModule } from './groups/groups.module';
 import { HifzModule } from './hifz/hifz.module';
+import { TajweedModule } from './tajweed/tajweed.module';
 import { PluginsModule } from './plugins/plugins.module';
 import { AssignmentsModule } from './assignments/assignments.module';
 import { CodingModule } from './coding/coding.module';
@@ -72,6 +73,7 @@ import { RecordingsModule } from './recordings/recordings.module';
     QuranModule,
     GroupsModule,
     HifzModule,
+    TajweedModule,
     AssignmentsModule,
     CodingModule,
     AssessmentModule,

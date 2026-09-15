@@ -325,6 +325,18 @@ export class CoursesService {
       // Groups cascade their members.
       await tx.studentGroup.deleteMany({ where: { courseId: c } });
 
+      // Tajweed before Hifz, since a correction can point at a recitation. Its
+      // history goes too: revisions deliberately outlive a single deletion, but
+      // not the course — they hold snapshots of students' corrections.
+      const tajweed = await tx.tajweedAnnotation.findMany({
+        where: { courseId: c },
+        select: { id: true },
+      });
+      await tx.tajweedAnnotationRevision.deleteMany({
+        where: { annotationId: { in: tajweed.map((a) => a.id) } },
+      });
+      await tx.tajweedAnnotation.deleteMany({ where: { courseId: c } });
+
       await tx.hifzEntry.deleteMany({ where: { courseId: c } });
       await tx.hifzTarget.deleteMany({ where: { courseId: c } });
 
