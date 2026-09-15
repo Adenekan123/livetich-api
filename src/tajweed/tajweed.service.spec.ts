@@ -5,6 +5,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  NotFoundException,
 } from '@nestjs/common';
 import { Role } from '@prisma/client';
 import type { JwtPayload } from '../auth/jwt-payload';
@@ -16,7 +17,10 @@ import { TajweedService } from './tajweed.service';
 
 const COURSE = 'course-1';
 const ORG = 'org-1';
-const ENROLLED = new Set(['student-1', 'student-2']);
+const STUDENTS: Record<string, string> = {
+  'student-1': 'Ahmad',
+  'student-2': 'Bilal',
+};
 
 const person = (over: Partial<JwtPayload>): JwtPayload => ({
   sub: 'teacher-1',
@@ -38,6 +42,15 @@ const outsideAdmin = person({
 
 type Row = Record<string, unknown> & { id: string; version: number };
 
+/** Every key of `where` matches the row (null included); OR is ignored. */
+const matches = (
+  row: Record<string, unknown>,
+  where: Record<string, unknown>,
+) =>
+  Object.entries(where).every(
+    ([key, value]) => key === 'OR' || value === undefined || row[key] === value,
+  );
+
 /**
  * An in-memory Prisma, just deep enough for the service. Authorization is not
  * faked: the real CoursesService.assertCanManageCourse runs against it, so the
@@ -45,7 +58,7 @@ type Row = Record<string, unknown> & { id: string; version: number };
  */
 function setup() {
   const rows = new Map<string, Row>();
-  const revisions: Record<string, unknown>[] = [];
+  const revisions: (Record<string, unknown> & { changedAt: Date })[] = [];
   const prisma = {
     course: {
       findUnique: jest.fn(async ({ where }: { where: { id: string } }) =>
@@ -56,8 +69,16 @@ function setup() {
     },
     enrollment: {
       findFirst: jest.fn(async ({ where }: { where: { studentId: string } }) =>
-        ENROLLED.has(where.studentId) ? { id: 'enrollment' } : null,
+        STUDENTS[where.studentId] ? { id: 'enrollment' } : null,
       ),
+      findMany: jest.fn(async ({ where }: { where: { studentId?: string } }) =>
+        Object.entries(STUDENTS)
+          .filter(([id]) => !where.studentId || id === where.studentId)
+          .map(([id, name]) => ({ student: { id, name } })),
+      ),
+    },
+    user: {
+      findMany: jest.fn(async () => [{ id: teacher.sub, name: 'Teacher' }]),
     },
     liveSession: {
       findFirst: jest.fn(
@@ -85,24 +106,11 @@ function setup() {
         rows.get(where.id)!,
       ),
       findFirst: jest.fn(
-        async ({ where }: { where: { id: string; courseId: string } }) => {
-          const r = rows.get(where.id);
-          return r && r.courseId === where.courseId ? r : null;
-        },
+        async ({ where }: { where: Record<string, unknown> }) =>
+          [...rows.values()].find((r) => matches(r, where)) ?? null,
       ),
-      findMany: jest.fn(
-        async ({
-          where,
-        }: {
-          where: { courseId: string; mode: string; studentId?: string };
-        }) =>
-          [...rows.values()].filter(
-            (r) =>
-              r.courseId === where.courseId &&
-              r.mode === where.mode &&
-              (where.studentId === undefined ||
-                r.studentId === where.studentId),
-          ),
+      findMany: jest.fn(async ({ where }: { where: Record<string, unknown> }) =>
+        [...rows.values()].filter((r) => matches(r, where)),
       ),
       create: jest.fn(
         async ({
@@ -130,11 +138,11 @@ function setup() {
           where,
           data,
         }: {
-          where: { id: string; version: number };
+          where: Record<string, unknown> & { id: string };
           data: Record<string, unknown>;
         }) => {
           const r = rows.get(where.id);
-          if (!r || r.version !== where.version) return { count: 0 };
+          if (!r || !matches(r, where)) return { count: 0 };
           // The fake bumps the version itself, as Prisma's `increment` would.
           const rest = { ...data };
           delete rest.version;
@@ -153,9 +161,18 @@ function setup() {
     },
     tajweedAnnotationRevision: {
       create: jest.fn(async ({ data }: { data: Record<string, unknown> }) => {
-        revisions.push(data);
-        return data;
+        const saved = {
+          id: `rev-${revisions.length + 1}`,
+          changedAt: new Date(),
+          ...data,
+        };
+        revisions.push(saved);
+        return saved;
       }),
+      findMany: jest.fn(
+        async ({ where }: { where: { annotationId: string } }) =>
+          revisions.filter((r) => r.annotationId === where.annotationId),
+      ),
     },
     $transaction: jest.fn(),
   };
@@ -249,6 +266,9 @@ describe('TajweedService', () => {
     await expect(
       service.list(outsideAdmin, COURSE, { sessionId: 'session-1' }),
     ).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(service.progress(outsideAdmin, COURSE)).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
   });
 
   it("refuses a reference that is not in the Qur'an", async () => {
@@ -270,6 +290,18 @@ describe('TajweedService', () => {
         lesson({ sessionId: 'someone-elses-session' }),
       ),
     ).rejects.toThrow(/Session not found/);
+  });
+
+  it('saves prepared lesson material to a lesson, with no session at all', async () => {
+    const { service, broadcaster } = setup();
+    const saved = await service.create(
+      teacher,
+      COURSE,
+      lesson({ sessionId: undefined, sectionId: 'section-1' }),
+    );
+    expect(saved).toMatchObject({ sectionId: 'section-1', sessionId: null });
+    // Nobody is in a room to tell.
+    expect(broadcaster.emitToSession).not.toHaveBeenCalled();
   });
 
   it('keeps lesson material and student corrections apart', async () => {
@@ -394,6 +426,98 @@ describe('TajweedService', () => {
       'student-1',
     );
     expect(byRule).toEqual({ qalqalah: { issues: 1, correct: 1 } });
+  });
+
+  it('shows staff the whole class’s progress, and a student only their own', async () => {
+    const { service } = setup();
+    await service.create(teacher, COURSE, correction());
+    await service.create(
+      teacher,
+      COURSE,
+      correction({ id: 'correction-0002', outcome: 'REPEAT', rule: undefined }),
+    );
+
+    const classView = await service.progress(teacher, COURSE);
+    expect(classView).toEqual([
+      expect.objectContaining({
+        student: { id: 'student-1', name: 'Ahmad' },
+        total: 2,
+        byRule: { qalqalah: { issues: 1, correct: 0 } },
+        byOutcome: { TAJWEED_ISSUE: 1, REPEAT: 1 },
+      }),
+      expect.objectContaining({
+        student: { id: 'student-2', name: 'Bilal' },
+        total: 0,
+        lastAt: null,
+      }),
+    ]);
+
+    const own = await service.progress(student, COURSE);
+    expect(own.map((r) => r.student.id)).toEqual(['student-1']);
+  });
+
+  it('shows staff who changed an annotation and when — even after it is deleted', async () => {
+    const { service } = setup();
+    await service.create(teacher, COURSE, correction());
+    await service.update(teacher, COURSE, 'correction-0001', {
+      version: 1,
+      note: 'Bounce the qaf',
+    });
+    await service.remove(teacher, COURSE, 'correction-0001');
+
+    const history = await service.history(teacher, COURSE, 'correction-0001');
+    expect(history.map((h) => h.change)).toEqual([
+      'CREATED',
+      'UPDATED',
+      'DELETED',
+    ]);
+    expect(history[1]).toMatchObject({
+      version: 2,
+      changedBy: { name: 'Teacher' },
+      snapshot: expect.objectContaining({ note: 'Bounce the qaf' }),
+    });
+
+    await expect(
+      service.history(student, COURSE, 'correction-0001'),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(
+      service.history(teacher, COURSE, 'never-existed'),
+    ).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('links the corrections heard in a session to the recitation they belong to', async () => {
+    const { service, rows, revisions } = setup();
+    await service.create(teacher, COURSE, correction());
+    // Another student's correction in the same session is not theirs to link.
+    await service.create(
+      teacher,
+      COURSE,
+      correction({ id: 'correction-0002', studentId: 'student-2' }),
+    );
+
+    const entry = {
+      id: 'entry-1',
+      courseId: COURSE,
+      studentId: 'student-1',
+      sessionId: 'session-1',
+      recordedById: teacher.sub,
+    };
+    expect(await service.linkCorrectionsToRecitation(entry)).toBe(1);
+    expect(rows.get('correction-0001')).toMatchObject({
+      hifzEntryId: 'entry-1',
+      version: 2,
+    });
+    expect(rows.get('correction-0002')).toMatchObject({ hifzEntryId: null });
+    expect(revisions.at(-1)).toMatchObject({
+      change: 'UPDATED',
+      annotationId: 'correction-0001',
+    });
+
+    // Saving again links nothing twice, and a recitation outside a session links nothing.
+    expect(await service.linkCorrectionsToRecitation(entry)).toBe(0);
+    expect(
+      await service.linkCorrectionsToRecitation({ ...entry, sessionId: null }),
+    ).toBe(0);
   });
 
   it('stores a note as plain text', async () => {

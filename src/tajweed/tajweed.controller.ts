@@ -78,6 +78,26 @@ export class TajweedController {
     return this.tajweed.remove(user, courseId, id, q.sessionId);
   }
 
+  /** Who changed an annotation and when, including after deletion. Staff only. */
+  @Get('annotations/:id/history')
+  history(
+    @CurrentUser() user: JwtPayload,
+    @Param('courseId') courseId: string,
+    @Param('id') id: string,
+  ) {
+    return this.tajweed.history(user, courseId, id);
+  }
+
+  /** Per-student, per-rule counts of what the teacher recorded. Staff see the
+   *  class; a student sees only themselves. */
+  @Get('progress')
+  progress(
+    @CurrentUser() user: JwtPayload,
+    @Param('courseId') courseId: string,
+  ) {
+    return this.tajweed.progress(user, courseId);
+  }
+
   /** One student's corrections with a per-rule tally. Staff for anyone in the
    *  course; a student for themselves only. */
   @Get('students/:studentId/corrections')

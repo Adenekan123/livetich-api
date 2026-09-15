@@ -317,14 +317,142 @@ export class TajweedService {
       },
       orderBy: { createdAt: 'desc' },
     });
-    const byRule: Record<string, { issues: number; correct: number }> = {};
-    for (const r of rows) {
-      if (!r.rule) continue;
-      const t = (byRule[r.rule] ??= { issues: 0, correct: 0 });
-      if (r.outcome === TajweedOutcome.TAJWEED_ISSUE) t.issues++;
-      if (r.outcome === TajweedOutcome.CORRECT) t.correct++;
+    return { corrections: rows.map(toPublic), byRule: tallyByRule(rows) };
+  }
+
+  /**
+   * Where each student stands, rule by rule, from what the teacher recorded.
+   *
+   * Counts only — issues heard and correct recitations — never a score or a
+   * grade. Staff see every enrolled student; a student sees only themselves.
+   */
+  async progress(user: JwtPayload, courseId: string) {
+    const staff = await this.canManage(user, courseId);
+    if (!staff) await this.assertEnrolled(courseId, user.sub);
+    const mine = staff ? {} : { studentId: user.sub };
+    const [enrollments, rows] = await this.prisma.$transaction([
+      this.prisma.enrollment.findMany({
+        where: { courseId, ...mine },
+        select: { student: { select: { id: true, name: true } } },
+        orderBy: { student: { name: 'asc' } },
+      }),
+      this.prisma.tajweedAnnotation.findMany({
+        where: {
+          courseId,
+          mode: TajweedAnnotationMode.STUDENT_CORRECTION,
+          ...mine,
+        },
+        select: {
+          studentId: true,
+          rule: true,
+          outcome: true,
+          createdAt: true,
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+    ]);
+    return enrollments.map(({ student }) => {
+      const theirs = rows.filter((r) => r.studentId === student.id);
+      const byOutcome: Partial<Record<TajweedOutcome, number>> = {};
+      for (const r of theirs) {
+        if (r.outcome) byOutcome[r.outcome] = (byOutcome[r.outcome] ?? 0) + 1;
+      }
+      return {
+        student,
+        total: theirs.length,
+        lastAt: theirs[0]?.createdAt.toISOString() ?? null,
+        byRule: tallyByRule(theirs),
+        byOutcome,
+      };
+    });
+  }
+
+  /**
+   * Who changed an annotation, what it looked like after each change, and
+   * when — including after it was deleted. Staff only: a correction's history
+   * is part of a student's record.
+   */
+  async history(user: JwtPayload, courseId: string, id: string) {
+    await this.courses.assertCanManageCourse(user, courseId);
+    const revisions = await this.prisma.tajweedAnnotationRevision.findMany({
+      where: { annotationId: id },
+      orderBy: { changedAt: 'asc' },
+    });
+    // Ids are chosen by clients, so the snapshot — not the id — decides which
+    // course a revision belongs to. Another course's history never leaks here.
+    const inCourse = revisions.filter(
+      (r) =>
+        (r.snapshot as { courseId?: string } | null)?.courseId === courseId,
+    );
+    if (!inCourse.length) {
+      throw new NotFoundException('Annotation not found in this course');
     }
-    return { corrections: rows.map(toPublic), byRule };
+    const people = await this.prisma.user.findMany({
+      where: { id: { in: [...new Set(inCourse.map((r) => r.changedById))] } },
+      select: { id: true, name: true },
+    });
+    const names = new Map(people.map((p) => [p.id, p.name]));
+    return inCourse.map((r) => ({
+      id: r.id,
+      version: r.version,
+      change: r.change,
+      changedAt: r.changedAt.toISOString(),
+      changedBy: {
+        id: r.changedById,
+        name: names.get(r.changedById) ?? 'Unknown',
+      },
+      snapshot: r.snapshot as unknown as TajweedAnnotation,
+    }));
+  }
+
+  /**
+   * Attach the corrections heard in a session to the recitation they belong to.
+   *
+   * Called when the teacher saves a student's recitation, so the Hifz record
+   * and the Tajweed corrections made while listening become one account of the
+   * sitting. Only corrections not already linked are touched, each as a
+   * version-checked edit with its own history entry; one changed meanwhile is
+   * left alone rather than overwritten.
+   */
+  async linkCorrectionsToRecitation(entry: {
+    id: string;
+    courseId: string;
+    studentId: string;
+    sessionId: string | null;
+    recordedById: string;
+  }): Promise<number> {
+    if (!entry.sessionId) return 0;
+    const rows = await this.prisma.tajweedAnnotation.findMany({
+      where: {
+        courseId: entry.courseId,
+        studentId: entry.studentId,
+        sessionId: entry.sessionId,
+        mode: TajweedAnnotationMode.STUDENT_CORRECTION,
+        hifzEntryId: null,
+      },
+    });
+    let linked = 0;
+    for (const row of rows) {
+      await this.prisma.$transaction(async (tx) => {
+        const { count } = await tx.tajweedAnnotation.updateMany({
+          where: { id: row.id, version: row.version, hifzEntryId: null },
+          data: {
+            hifzEntryId: entry.id,
+            version: { increment: 1 },
+            updatedById: entry.recordedById,
+          },
+        });
+        if (count === 0) return;
+        const next = await tx.tajweedAnnotation.findUniqueOrThrow({
+          where: { id: row.id },
+        });
+        await tx.tajweedAnnotationRevision.create({
+          data: revision(next, TajweedChange.UPDATED, entry.recordedById),
+        });
+        linked++;
+      });
+    }
+    return linked;
   }
 
   // ---- helpers ---------------------------------------------------------
@@ -360,8 +488,9 @@ export class TajweedService {
     const row = await this.prisma.tajweedAnnotation.findFirst({
       where: { id, courseId },
     });
-    if (!row)
+    if (!row) {
       throw new NotFoundException('Annotation not found in this course');
+    }
     return row;
   }
 
@@ -392,8 +521,9 @@ export class TajweedService {
         where: { id: sessionId, courseId },
         select: { sectionId: true },
       });
-      if (!session)
+      if (!session) {
         throw new NotFoundException('Session not found in this course');
+      }
       section ??= session.sectionId;
     }
     if (section) {
@@ -401,8 +531,9 @@ export class TajweedService {
         where: { id: section, courseId },
         select: { id: true },
       });
-      if (!found)
+      if (!found) {
         throw new NotFoundException('Lesson not found in this course');
+      }
     }
     return section;
   }
@@ -432,8 +563,9 @@ export class TajweedService {
       where: { id: sessionId, courseId },
       select: { id: true },
     });
-    if (!session)
+    if (!session) {
       throw new NotFoundException('Session not found in this course');
+    }
     return sessionId;
   }
 
@@ -472,6 +604,20 @@ function selection(ref: SelectionRef) {
   }
 }
 
+/** Per rule: how many issues the teacher heard, and how many correct. */
+function tallyByRule(
+  rows: { rule: string | null; outcome: TajweedOutcome | null }[],
+) {
+  const byRule: Record<string, { issues: number; correct: number }> = {};
+  for (const r of rows) {
+    if (!r.rule) continue;
+    const t = (byRule[r.rule] ??= { issues: 0, correct: 0 });
+    if (r.outcome === TajweedOutcome.TAJWEED_ISSUE) t.issues++;
+    if (r.outcome === TajweedOutcome.CORRECT) t.correct++;
+  }
+  return byRule;
+}
+
 /** The rule, label, style and note, checked for the annotation's mode. */
 function contentOf(
   input: {
@@ -492,11 +638,13 @@ function contentOf(
   }
   if (mode === TajweedAnnotationMode.LESSON) {
     if (!rule) throw new BadRequestException('Choose a Tajweed rule');
-    if (outcome)
+    if (outcome) {
       throw new BadRequestException('Only a correction has an outcome');
+    }
   } else {
-    if (!outcome)
+    if (!outcome) {
       throw new BadRequestException('Choose what the correction is');
+    }
     if (outcome === TajweedOutcome.TAJWEED_ISSUE && !rule) {
       throw new BadRequestException('Choose which Tajweed rule needs work');
     }
