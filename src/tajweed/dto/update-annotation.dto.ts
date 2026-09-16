@@ -1,21 +1,24 @@
+import { TajweedAnnotationStyle, TajweedOutcome } from '@prisma/client';
+import { Type } from 'class-transformer';
 import {
-  TajweedAnnotationStyle,
-  TajweedOutcome,
-  TajweedSelection,
-} from '@prisma/client';
-import {
+  ArrayMaxSize,
+  ArrayNotEmpty,
+  IsArray,
+  IsBoolean,
   IsEnum,
   IsIn,
   IsInt,
   IsOptional,
   IsString,
   Matches,
-  Max,
   MaxLength,
   Min,
+  ValidateNested,
 } from 'class-validator';
+import { MAX_PARTS } from '../../quran/quran-words';
 import { TAJWEED_RULE_KEYS, type TajweedRule } from '../../shared';
 import { HEX_COLOR } from '../tajweed-input';
+import { TajweedPartDto } from './part.dto';
 
 /**
  * An edit. Absent fields are left as they are; null clears an optional field.
@@ -33,40 +36,19 @@ export class UpdateTajweedAnnotationDto {
   @IsString()
   sessionId?: string;
 
+  /** Where the mark points now. Sent whole: the parts given replace the ones
+   *  stored, so dropping a letter is the same shape of request as adding one. */
   @IsOptional()
-  @IsInt()
-  @Min(1)
-  @Max(114)
-  surahNumber?: number;
+  @IsArray()
+  @ArrayNotEmpty()
+  @ArrayMaxSize(MAX_PARTS)
+  @ValidateNested({ each: true })
+  @Type(() => TajweedPartDto)
+  parts?: TajweedPartDto[];
 
   @IsOptional()
-  @IsInt()
-  @Min(1)
-  ayahNumber?: number;
-
-  @IsOptional()
-  @IsEnum(TajweedSelection)
-  selection?: TajweedSelection;
-
-  @IsOptional()
-  @IsInt()
-  @Min(0)
-  wordStart?: number | null;
-
-  @IsOptional()
-  @IsInt()
-  @Min(0)
-  wordEnd?: number | null;
-
-  @IsOptional()
-  @IsInt()
-  @Min(0)
-  letterStart?: number | null;
-
-  @IsOptional()
-  @IsInt()
-  @Min(0)
-  letterEnd?: number | null;
+  @IsBoolean()
+  kept?: boolean;
 
   @IsOptional()
   @IsIn(TAJWEED_RULE_KEYS)

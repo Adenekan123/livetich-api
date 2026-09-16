@@ -828,12 +828,6 @@ model HifzEntry {
 // the Arabic, so the text cannot drift from its source. See quran-words.ts.
 
 /// How much of an ayah an annotation covers.
-enum TajweedSelection {
-  AYAH
-  WORD
-  LETTERS
-}
-
 /// How an annotation is drawn. A colour, when set, overrides the rule's default.
 enum TajweedAnnotationStyle {
   HIGHLIGHT
@@ -874,18 +868,17 @@ model TajweedAnnotation {
   studentId      String?
   /// The recitation a correction was heard in, when one was logged.
   hifzEntryId    String?
+  /// The first part's ayah, denormalised for filing and ordering. Where the
+  /// annotation is drawn is decided by its parts, which may span ayahs.
   surahNumber    Int
   ayahNumber     Int
-  selection      TajweedSelection
-  /// 0-based word positions in the ayah, ends inclusive. Null for AYAH.
-  wordStart      Int?
-  wordEnd        Int?
-  /// 0-based letter positions within one word, ends inclusive. LETTERS only.
-  letterStart    Int?
-  letterEnd      Int?
-  /// A key of TAJWEED_RULES (src/shared). A string rather than an enum so a new
-  /// rule needs no migration. Null only for a correction with no rule attached.
-  rule           String?                @db.VarChar(32)
+  /// Kept for next time: shown to any class in this course that opens these
+  /// ayahs, instead of only the lesson it was made in.
+  kept           Boolean                @default(false)
+  /// A key of TAJWEED_RULES (src/shared), as "group.rule". A string rather than
+  /// an enum so a new rule needs no migration. Null only for a correction with
+  /// no rule attached.
+  rule           String?                @db.VarChar(48)
   customLabel    String?                @db.VarChar(60)
   style          TajweedAnnotationStyle @default(HIGHLIGHT)
   /// #rrggbb, the teacher's own colour.
@@ -909,11 +902,37 @@ model TajweedAnnotation {
   hifzEntry    HifzEntry?   @relation(fields: [hifzEntryId], references: [id], onDelete: SetNull)
   createdBy    User         @relation("tajweedCreator", fields: [createdById], references: [id])
   updatedBy    User         @relation("tajweedUpdater", fields: [updatedById], references: [id])
+  parts        TajweedAnnotationPart[]
 
   @@index([courseId, sectionId])
   @@index([courseId, studentId])
+  /// Kept marks come back for any class in the course that opens the ayah.
+  @@index([courseId, kept])
   @@index([sessionId])
   @@index([organizationId, createdAt])
+}
+
+/// One piece of text an annotation holds: a whole ayah, one word of it, or one
+/// letter of that word. A mark is its parts, and they may sit in different
+/// ayahs — a rule can hold the last letter of one and the first of the next.
+/// Nothing between two parts is implied.
+model TajweedAnnotationPart {
+  id           String @id @default(cuid())
+  annotationId String @db.VarChar(64)
+  /// Reading order within the mark, so it is drawn and read back as picked.
+  position     Int
+  surahNumber  Int
+  ayahNumber   Int
+  /// 0-based word in the ayah; null marks the whole ayah.
+  wordIndex    Int?
+  /// 0-based grapheme cluster in that word; null marks the whole word.
+  letterIndex  Int?
+
+  annotation TajweedAnnotation @relation(fields: [annotationId], references: [id], onDelete: Cascade)
+
+  /// "What is marked on this ayah?" — the question every render asks.
+  @@index([surahNumber, ayahNumber])
+  @@index([annotationId, position])
 }
 
 enum TajweedChange {

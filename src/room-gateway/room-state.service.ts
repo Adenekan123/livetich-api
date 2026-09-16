@@ -6,6 +6,7 @@ import type {
   RoomScheme,
   RoomUser,
   StageView,
+  TajweedPart,
   TajweedTemporaryAnnotation,
 } from '../shared';
 import { ROOM_SCHEMES } from '../shared';
@@ -137,6 +138,43 @@ export class RoomStateService {
     const key = this.k(sessionId, 'tajweed');
     if (id) await this.redis.hdel(key, id);
     else await this.redis.del(key);
+  }
+
+  // ---------- What the instructor is pointing at ----------
+
+  /**
+   * The parts the instructor has picked but not yet marked.
+   *
+   * The class sees these outlined while the teacher decides, which is what
+   * makes marking a shared act rather than a result landing on the page. It is
+   * a selection, not a mark: an empty list is how it goes away, and like every
+   * live annotation it never reaches the database.
+   */
+  async setTajweedPointing(sessionId: string, parts: TajweedPart[]) {
+    const key = this.k(sessionId, 'tajweed-point');
+    if (!parts.length) {
+      await this.redis.del(key);
+      return;
+    }
+    await this.redis.set(
+      key,
+      JSON.stringify(parts),
+      'EX',
+      RoomStateService.TTL,
+    );
+  }
+
+  /** What is pointed at right now; empty when nothing is. */
+  async getTajweedPointing(sessionId: string): Promise<TajweedPart[]> {
+    const raw = await this.redis.get(this.k(sessionId, 'tajweed-point'));
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw) as TajweedPart[];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      // Nothing readable is nothing pointed at, rather than a broken room.
+      return [];
+    }
   }
 
   /**

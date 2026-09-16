@@ -25,10 +25,11 @@ import type {
   RoomScheme,
   RoomUser,
   ServerToClientEvents,
+  TajweedPart,
   TajweedTemporaryAnnotation,
 } from '../shared';
 import { ROOM_SCHEMES } from '../shared';
-import { validateSelection } from '../quran/quran-words';
+import { firstAyahOf, validateParts } from '../quran/quran-words';
 import {
   ANNOTATION_ID,
   cleanText,
@@ -318,6 +319,7 @@ export class RoomGateway
       // Whatever the instructor is pointing at right now, so a late joiner
       // sees the same marked words as everyone else.
       await this.sendTajweedTemporary(p.sessionId, client);
+      await this.sendTajweedPointing(p.sessionId, client);
     }
     await this.broadcastHands(p.sessionId, client);
     await this.broadcastSpeakers(p.sessionId, client);
@@ -572,9 +574,9 @@ export class RoomGateway
     if (!isTajweedRule(a.rule)) {
       return this.fail(client, 'BAD_REQUEST', 'Unknown Tajweed rule');
     }
-    let ref;
+    let parts;
     try {
-      ref = validateSelection(a);
+      parts = validateParts(a.parts);
     } catch (e) {
       return this.fail(client, 'BAD_REQUEST', (e as Error).message);
     }
@@ -585,7 +587,8 @@ export class RoomGateway
     const ttlSec = Math.min(3600, Math.max(0, Math.trunc(Number(a.ttlSec) || 0)));
     const annotation: TajweedTemporaryAnnotation = {
       id: a.id,
-      ...ref,
+      ...firstAyahOf(parts),
+      parts,
       rule: a.rule,
       customLabel,
       style: a.style === 'UNDERLINE' ? 'UNDERLINE' : 'HIGHLIGHT',
@@ -615,6 +618,42 @@ export class RoomGateway
     await this.sendTajweedTemporary(p.sessionId);
   }
 
+  /**
+   * Show the class what the instructor has picked, before any rule.
+   *
+   * This is the selection itself, not a mark: every screen outlines the same
+   * letters while the teacher decides which rule it is. Sending an empty list
+   * takes the outline away, and nothing here is ever stored.
+   */
+  @SubscribeMessage('tajweed:pointing:set')
+  async onTajweedPointingSet(
+    @ConnectedSocket() client: RoomSocket,
+    @MessageBody() p: { sessionId: string; parts: TajweedPart[] },
+  ) {
+    if (!(await this.isOwner(client, p.sessionId))) return;
+    let parts: TajweedPart[] = [];
+    if (Array.isArray(p.parts) && p.parts.length) {
+      try {
+        parts = validateParts(p.parts);
+      } catch (e) {
+        return this.fail(client, 'BAD_REQUEST', (e as Error).message);
+      }
+    }
+    await this.state.setTajweedPointing(p.sessionId, parts);
+    await this.sendTajweedPointing(p.sessionId);
+  }
+
+  /** Stop pointing — the teacher closed the selection or marked it. */
+  @SubscribeMessage('tajweed:pointing:clear')
+  async onTajweedPointingClear(
+    @ConnectedSocket() client: RoomSocket,
+    @MessageBody() p: { sessionId: string },
+  ) {
+    if (!(await this.isOwner(client, p.sessionId))) return;
+    await this.state.setTajweedPointing(p.sessionId, []);
+    await this.sendTajweedPointing(p.sessionId);
+  }
+
   /** The full live list — to one joining client, or to the whole room. */
   private async sendTajweedTemporary(sessionId: string, client?: RoomSocket) {
     const payload = {
@@ -623,6 +662,16 @@ export class RoomGateway
     };
     if (client) client.emit('tajweed:temporary', payload);
     else this.server.to(sessionId).emit('tajweed:temporary', payload);
+  }
+
+  /** What is pointed at — to one joining client, or to the whole room. */
+  private async sendTajweedPointing(sessionId: string, client?: RoomSocket) {
+    const payload = {
+      sessionId,
+      parts: await this.state.getTajweedPointing(sessionId),
+    };
+    if (client) client.emit('tajweed:pointing', payload);
+    else this.server.to(sessionId).emit('tajweed:pointing', payload);
   }
 
   // ---------- Raised hands ----------

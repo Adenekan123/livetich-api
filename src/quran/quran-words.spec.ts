@@ -1,4 +1,4 @@
-import { ayahWords, graphemes, validateSelection } from './quran-words';
+import { ayahWords, graphemes, validateParts } from './quran-words';
 
 describe('quran-words', () => {
   describe('ayahWords', () => {
@@ -69,116 +69,67 @@ describe('quran-words', () => {
     });
   });
 
-  describe('validateSelection', () => {
-    it('accepts a whole ayah and nulls the positions', () => {
-      expect(
-        validateSelection({
-          surahNumber: 113,
-          ayahNumber: 2,
-          selection: 'AYAH',
-          wordStart: 3,
-        }),
-      ).toEqual({
-        surahNumber: 113,
-        ayahNumber: 2,
-        selection: 'AYAH',
-        wordStart: null,
-        wordEnd: null,
-        letterStart: null,
-        letterEnd: null,
-      });
+  describe('validateParts', () => {
+    /** A part of Al-Falaq: ayah 1 has 4 words, ayah 2 has 4. */
+    const at = (
+      ayahNumber: number,
+      wordIndex: number,
+      letterIndex?: number,
+    ) => ({
+      surahNumber: 113,
+      ayahNumber,
+      wordIndex,
+      ...(letterIndex === undefined ? {} : { letterIndex }),
     });
 
-    it('accepts a word, and a range of words', () => {
-      expect(
-        validateSelection({
-          surahNumber: 113,
-          ayahNumber: 2,
-          selection: 'WORD',
-          wordStart: 1,
-        }),
-      ).toMatchObject({ wordStart: 1, wordEnd: 1, letterStart: null });
-      expect(
-        validateSelection({
-          surahNumber: 113,
-          ayahNumber: 2,
-          selection: 'WORD',
-          wordStart: 0,
-          wordEnd: 1,
-        }),
-      ).toMatchObject({ wordStart: 0, wordEnd: 1 });
+    it('accepts a whole ayah, a whole word, and a single letter', () => {
+      expect(validateParts([{ surahNumber: 113, ayahNumber: 2 }])).toEqual([
+        { surahNumber: 113, ayahNumber: 2, wordIndex: null, letterIndex: null },
+      ]);
+      expect(validateParts([at(2, 1)])).toEqual([
+        { surahNumber: 113, ayahNumber: 2, wordIndex: 1, letterIndex: null },
+      ]);
+      expect(validateParts([at(1, 2, 2)])).toEqual([
+        { surahNumber: 113, ayahNumber: 1, wordIndex: 2, letterIndex: 2 },
+      ]);
     });
 
-    it('accepts letters inside one word', () => {
-      expect(
-        validateSelection({
-          surahNumber: 113,
-          ayahNumber: 1,
-          selection: 'LETTERS',
-          wordStart: 2,
-          letterStart: 2,
-          letterEnd: 2,
-        }),
-      ).toMatchObject({
-        wordStart: 2,
-        wordEnd: 2,
-        letterStart: 2,
-        letterEnd: 2,
-      });
+    it('holds letters from two different ayahs, in reading order', () => {
+      // The whole point of parts: a rule can live on a letter of one ayah and a
+      // letter of the next, with nothing between them taken in.
+      expect(validateParts([at(2, 3, 1), at(1, 0, 0)])).toEqual([
+        { surahNumber: 113, ayahNumber: 1, wordIndex: 0, letterIndex: 0 },
+        { surahNumber: 113, ayahNumber: 2, wordIndex: 3, letterIndex: 1 },
+      ]);
+    });
+
+    it('keeps one part when the same letter is picked twice', () => {
+      expect(validateParts([at(1, 0, 0), at(1, 0, 0)])).toHaveLength(1);
     });
 
     it.each([
       [{ surahNumber: 0, ayahNumber: 1 }, /Surah must be/],
       [{ surahNumber: 113, ayahNumber: 6 }, /has no ayah 6/],
+      [{ surahNumber: 113, ayahNumber: 1, wordIndex: 4 }, /does not exist/],
+      [{ surahNumber: 113, ayahNumber: 1, wordIndex: -1 }, /does not exist/],
+      [{ surahNumber: 113, ayahNumber: 1, wordIndex: 1.5 }, /does not exist/],
       [
-        { surahNumber: 113, ayahNumber: 1, wordStart: 4 },
-        /word range does not exist/,
+        { surahNumber: 113, ayahNumber: 1, wordIndex: 2, letterIndex: 3 },
+        /letters/,
       ],
       [
-        { surahNumber: 113, ayahNumber: 1, wordStart: 2, wordEnd: 1 },
-        /word range/,
+        { surahNumber: 113, ayahNumber: 1, letterIndex: 0 },
+        /letter needs the word/,
       ],
-      [{ surahNumber: 113, ayahNumber: 1, wordStart: -1 }, /word range/],
-      [{ surahNumber: 113, ayahNumber: 1, wordStart: 1.5 }, /word range/],
-    ])(
-      'rejects a word selection that is not in the text: %j',
-      (ref, message) => {
-        expect(() => validateSelection({ selection: 'WORD', ...ref })).toThrow(
-          message,
-        );
-      },
-    );
-
-    it('rejects letters beyond the word, or spanning two words', () => {
-      expect(() =>
-        validateSelection({
-          surahNumber: 113,
-          ayahNumber: 1,
-          selection: 'LETTERS',
-          wordStart: 2,
-          letterStart: 3,
-        }),
-      ).toThrow(/letter range does not exist/);
-      expect(() =>
-        validateSelection({
-          surahNumber: 113,
-          ayahNumber: 1,
-          selection: 'LETTERS',
-          wordStart: 1,
-          wordEnd: 2,
-          letterStart: 0,
-        }),
-      ).toThrow(/within one word/);
+    ])('rejects a part that is not in the text: %j', (part, message) => {
+      expect(() => validateParts([part])).toThrow(message);
     });
 
-    it('rejects an unknown selection type', () => {
+    it('rejects nothing picked, and more pieces than one mark may hold', () => {
+      expect(() => validateParts([])).toThrow(/Pick a word or a letter/);
       expect(() =>
-        validateSelection({
-          surahNumber: 113,
-          ayahNumber: 1,
-          selection: 'VERSE' as never,
-        }),
-      ).toThrow(/Unknown selection/);
+        validateParts(Array.from({ length: 65 }, (_, i) => at(1, i % 4))),
+      ).toThrow(/at most 64/);
     });
   });
 });

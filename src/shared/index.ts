@@ -99,27 +99,304 @@ export interface BuzzerState {
 // ---------- Tajweed (Islamic Education pack) ----------
 
 /**
- * The Tajweed rules an annotation can carry. Data, not buttons: the toolbar is
- * built from this, so adding a rule is one entry here plus its default style on
- * the web side. Colours are not part of the rule — Tajweed mushafs do not agree
- * on one scheme, so the web holds only suggestions and the teacher can change
- * them.
+ * The Tajweed rules an annotation can carry, in the groups a teacher thinks in.
+ *
+ * Data, not buttons: the picker is built from this, so adding a rule is one
+ * entry here. A rule is addressed as "group.rule" — nun.ikhfa_haqiqi. The
+ * Arabic name is part of the rule, because the teacher names it in Arabic to
+ * the class and the student's screen shows both. Colours are not here: Tajweed
+ * mushafs do not agree on one scheme, so the web holds suggestions per group
+ * and the teacher can change them.
+ *
+ * Riwayah of Hafs 'an 'Asim, drafted for an instructor to confirm.
  */
-export const TAJWEED_RULES = {
-  madd: { label: 'Madd', description: 'Elongation' },
-  ghunnah: { label: 'Ghunnah', description: 'Nasalization' },
-  ikhfa: { label: 'Ikhfa', description: 'Concealing noon sakinah or tanween' },
-  idgham: { label: 'Idgham', description: 'Merging into the next letter' },
-  iqlab: { label: 'Iqlab', description: 'Noon sakinah or tanween becomes meem before baa' },
-  izhar: { label: 'Izhar', description: 'Pronouncing clearly' },
-  qalqalah: { label: 'Qalqalah', description: 'The echoing bounce of ق ط ب ج د' },
-  waqf: { label: 'Waqf', description: 'Stopping' },
-  custom: { label: 'Custom note', description: 'A label of your own' },
-} as const;
-export type TajweedRule = keyof typeof TAJWEED_RULES;
+export const TAJWEED_RULE_GROUPS = [
+  {
+    key: 'nun',
+    label: 'Noon sakinah & tanween',
+    arabic: 'النون الساكنة والتنوين',
+    rules: [
+      { key: 'izhar_halqi', label: 'Izhar halqi', arabic: 'إظهار حلقي' },
+      {
+        key: 'idgham_ghunnah',
+        label: 'Idgham with ghunnah',
+        arabic: 'إدغام بغنة',
+      },
+      {
+        key: 'idgham_no_ghunnah',
+        label: 'Idgham without ghunnah',
+        arabic: 'إدغام بلا غنة',
+      },
+      { key: 'iqlab', label: 'Iqlab', arabic: 'إقلاب' },
+      { key: 'ikhfa_haqiqi', label: 'Ikhfa haqiqi', arabic: 'إخفاء حقيقي' },
+    ],
+  },
+  {
+    key: 'mim',
+    label: 'Meem sakinah',
+    arabic: 'الميم الساكنة',
+    rules: [
+      { key: 'ikhfa_shafawi', label: 'Ikhfa shafawi', arabic: 'إخفاء شفوي' },
+      { key: 'idgham_shafawi', label: 'Idgham shafawi', arabic: 'إدغام شفوي' },
+      { key: 'izhar_shafawi', label: 'Izhar shafawi', arabic: 'إظهار شفوي' },
+    ],
+  },
+  {
+    key: 'ghunnah',
+    label: 'Ghunnah',
+    arabic: 'الغنة',
+    rules: [
+      {
+        key: 'mushaddadah',
+        label: 'Noon or meem with shaddah',
+        arabic: 'غنة النون والميم المشددتين',
+      },
+    ],
+  },
+  {
+    key: 'qalqalah',
+    label: 'Qalqalah',
+    arabic: 'القلقلة',
+    rules: [
+      { key: 'sughra', label: 'Qalqalah sughra', arabic: 'قلقلة صغرى' },
+      { key: 'kubra', label: 'Qalqalah kubra', arabic: 'قلقلة كبرى' },
+    ],
+  },
+  {
+    key: 'madd',
+    label: 'Madd',
+    arabic: 'المد',
+    rules: [
+      { key: 'tabii', label: 'Madd tabi‘i', arabic: 'مد طبيعي' },
+      { key: 'muttasil', label: 'Madd muttasil', arabic: 'مد متصل' },
+      { key: 'munfasil', label: 'Madd munfasil', arabic: 'مد منفصل' },
+      { key: 'arid', label: 'Madd ‘arid lis-sukun', arabic: 'مد عارض للسكون' },
+      { key: 'lin', label: 'Madd lin', arabic: 'مد اللين' },
+      { key: 'badal', label: 'Madd badal', arabic: 'مد البدل' },
+      { key: 'iwad', label: 'Madd ‘iwad', arabic: 'مد العوض' },
+      {
+        key: 'silah_sughra',
+        label: 'Madd silah sughra',
+        arabic: 'مد الصلة الصغرى',
+      },
+      {
+        key: 'silah_kubra',
+        label: 'Madd silah kubra',
+        arabic: 'مد الصلة الكبرى',
+      },
+      {
+        key: 'lazim_kalimi_muthaqqal',
+        label: 'Madd lazim kalimi muthaqqal',
+        arabic: 'مد لازم كلمي مثقل',
+      },
+      {
+        key: 'lazim_kalimi_mukhaffaf',
+        label: 'Madd lazim kalimi mukhaffaf',
+        arabic: 'مد لازم كلمي مخفف',
+      },
+      {
+        key: 'lazim_harfi_muthaqqal',
+        label: 'Madd lazim harfi muthaqqal',
+        arabic: 'مد لازم حرفي مثقل',
+      },
+      {
+        key: 'lazim_harfi_mukhaffaf',
+        label: 'Madd lazim harfi mukhaffaf',
+        arabic: 'مد لازم حرفي مخفف',
+      },
+      { key: 'tamkin', label: 'Madd tamkin', arabic: 'مد التمكين' },
+      { key: 'farq', label: 'Madd farq', arabic: 'مد الفرق' },
+    ],
+  },
+  {
+    key: 'idgham',
+    label: 'Idgham of letters',
+    arabic: 'إدغام الحروف',
+    rules: [
+      {
+        key: 'mutamathilayn',
+        label: 'Mutamathilayn',
+        arabic: 'إدغام المتماثلين',
+      },
+      {
+        key: 'mutajanisayn',
+        label: 'Mutajanisayn',
+        arabic: 'إدغام المتجانسين',
+      },
+      {
+        key: 'mutaqaribayn',
+        label: 'Mutaqaribayn',
+        arabic: 'إدغام المتقاربين',
+      },
+    ],
+  },
+  {
+    key: 'lam',
+    label: 'Lam',
+    arabic: 'اللام',
+    rules: [
+      { key: 'shamsiyyah', label: 'Lam shamsiyyah', arabic: 'اللام الشمسية' },
+      { key: 'qamariyyah', label: 'Lam qamariyyah', arabic: 'اللام القمرية' },
+      {
+        key: 'jalalah_tafkhim',
+        label: 'Lam of Allah, heavy',
+        arabic: 'تفخيم لام لفظ الجلالة',
+      },
+      {
+        key: 'jalalah_tarqiq',
+        label: 'Lam of Allah, light',
+        arabic: 'ترقيق لام لفظ الجلالة',
+      },
+    ],
+  },
+  {
+    key: 'ra',
+    label: 'Ra',
+    arabic: 'الراء',
+    rules: [
+      { key: 'tafkhim', label: 'Ra heavy (tafkhim)', arabic: 'تفخيم الراء' },
+      { key: 'tarqiq', label: 'Ra light (tarqiq)', arabic: 'ترقيق الراء' },
+    ],
+  },
+  {
+    key: 'sifat',
+    label: 'Heavy & light letters',
+    arabic: 'التفخيم والترقيق',
+    rules: [
+      {
+        key: 'istila',
+        label: 'Heavy letter (isti‘la)',
+        arabic: 'حروف الاستعلاء',
+      },
+      {
+        key: 'istifal',
+        label: 'Light letter (istifal)',
+        arabic: 'حروف الاستفال',
+      },
+    ],
+  },
+  {
+    key: 'hamzah',
+    label: 'Hamzah',
+    arabic: 'الهمزة',
+    rules: [
+      { key: 'wasl', label: 'Hamzat al-wasl', arabic: 'همزة الوصل' },
+      { key: 'qat', label: 'Hamzat al-qat‘', arabic: 'همزة القطع' },
+    ],
+  },
+  {
+    key: 'waqf',
+    label: 'Stopping & starting',
+    arabic: 'الوقف والابتداء',
+    rules: [
+      { key: 'lazim', label: 'Must stop (lazim)', arabic: 'الوقف اللازم' },
+      { key: 'mamnu', label: 'Do not stop', arabic: 'الوقف الممنوع' },
+      { key: 'jaiz', label: 'Stopping allowed (jaiz)', arabic: 'الوقف الجائز' },
+      { key: 'wasl_awla', label: 'Joining preferred', arabic: 'الوصل أولى' },
+      { key: 'waqf_awla', label: 'Stopping preferred', arabic: 'الوقف أولى' },
+      {
+        key: 'muanaqah',
+        label: 'Stop at one of two (mu‘anaqah)',
+        arabic: 'وقف المعانقة',
+      },
+      { key: 'saktah', label: 'Saktah', arabic: 'السكتة' },
+    ],
+  },
+] as const;
+
+export type TajweedRuleGroupKey = (typeof TAJWEED_RULE_GROUPS)[number]['key'];
+
+/** Every "group.rule" in the taxonomy, as a type. */
+type RuleIdsOf<G> = G extends {
+  key: infer K extends string;
+  rules: readonly { key: infer R extends string }[];
+}
+  ? `${K}.${R}`
+  : never;
+export type TajweedRuleId = RuleIdsOf<(typeof TAJWEED_RULE_GROUPS)[number]>;
+
+/**
+ * Rule keys from before the taxonomy was grouped.
+ *
+ * Still accepted, so annotations already saved keep working, and deliberately
+ * kept out of the picker: "madd" named a group rather than a rule, and deciding
+ * for a teacher which madd they meant would rewrite their record.
+ */
+export const TAJWEED_LEGACY_RULES = [
+  'madd',
+  'ghunnah',
+  'ikhfa',
+  'idgham',
+  'iqlab',
+  'izhar',
+  'qalqalah',
+  'waqf',
+] as const;
+export type TajweedLegacyRule = (typeof TAJWEED_LEGACY_RULES)[number];
+
+export type TajweedRule = TajweedRuleId | TajweedLegacyRule | 'custom';
+
+export interface TajweedRuleInfo {
+  label: string;
+  /** The rule's name in Arabic, where it has one. */
+  arabic: string | null;
+  group: TajweedRuleGroupKey | null;
+  groupLabel: string | null;
+  /** Offered in the picker. Legacy keys are not. */
+  pickable: boolean;
+}
+
+const LEGACY_LABELS: Record<TajweedLegacyRule, string> = {
+  madd: 'Madd',
+  ghunnah: 'Ghunnah',
+  ikhfa: 'Ikhfa',
+  idgham: 'Idgham',
+  iqlab: 'Iqlab',
+  izhar: 'Izhar',
+  qalqalah: 'Qalqalah',
+  waqf: 'Waqf',
+};
+
+/** Every rule the API accepts, by key. */
+export const TAJWEED_RULES: Record<TajweedRule, TajweedRuleInfo> = (() => {
+  const out = {} as Record<TajweedRule, TajweedRuleInfo>;
+  for (const group of TAJWEED_RULE_GROUPS) {
+    for (const rule of group.rules) {
+      out[`${group.key}.${rule.key}` as TajweedRule] = {
+        label: rule.label,
+        arabic: rule.arabic,
+        group: group.key,
+        groupLabel: group.label,
+        pickable: true,
+      };
+    }
+  }
+  out.custom = {
+    label: 'Custom note',
+    arabic: null,
+    group: null,
+    groupLabel: null,
+    pickable: true,
+  };
+  for (const key of TAJWEED_LEGACY_RULES) {
+    out[key] = {
+      label: LEGACY_LABELS[key],
+      arabic: null,
+      group: null,
+      groupLabel: null,
+      pickable: false,
+    };
+  }
+  return out;
+})();
+
+/** Accepted on the way in — legacy keys included. */
 export const TAJWEED_RULE_KEYS = Object.keys(TAJWEED_RULES) as TajweedRule[];
 
-export type TajweedSelection = 'AYAH' | 'WORD' | 'LETTERS';
+/** Offered to a teacher, in taxonomy order. */
+export const TAJWEED_PICKABLE_RULE_KEYS = TAJWEED_RULE_KEYS.filter(
+  (key) => TAJWEED_RULES[key].pickable,
+);
 export type TajweedAnnotationStyle = 'HIGHLIGHT' | 'UNDERLINE';
 export type TajweedAnnotationMode = 'LESSON' | 'STUDENT_CORRECTION';
 export type TajweedOutcome =
@@ -129,16 +406,36 @@ export type TajweedOutcome =
   | 'PRONUNCIATION'
   | 'NOTE';
 
-/** Where in the canonical text an annotation points. Positions are 0-based
- *  with inclusive ends; letters are grapheme clusters, never string indices. */
-export interface TajweedRef {
+/**
+ * One piece of the text a mark holds: a whole ayah, one word of it, or one
+ * letter of that word.
+ *
+ * Positions are 0-based, and a letter is a grapheme cluster — never a string
+ * index, or the harakat would be cut off their letter.
+ */
+export interface TajweedPart {
   surahNumber: number;
   ayahNumber: number;
-  selection: TajweedSelection;
-  wordStart: number | null;
-  wordEnd: number | null;
-  letterStart: number | null;
-  letterEnd: number | null;
+  /** Null marks the whole ayah. */
+  wordIndex: number | null;
+  /** Null marks the whole word. */
+  letterIndex: number | null;
+}
+
+/**
+ * Where a mark points: the parts it holds, which may sit in different ayahs —
+ * a rule can live on the last letter of one ayah and the first of the next.
+ *
+ * Nothing between two parts is implied. The mark holds exactly what the teacher
+ * picked, so a noon in one word and a sheen two words later are those two
+ * letters and nothing in between.
+ */
+export interface TajweedRef {
+  /** The first part's ayah, denormalised: what the mark is filed under and
+   *  ordered by. Never trust it for drawing — use the parts. */
+  surahNumber: number;
+  ayahNumber: number;
+  parts: TajweedPart[];
 }
 
 /** A saved annotation, as the API returns it and the room broadcasts it. */
@@ -150,6 +447,9 @@ export interface TajweedAnnotation extends TajweedRef {
   mode: TajweedAnnotationMode;
   studentId: string | null;
   hifzEntryId: string | null;
+  /** Kept for next time: shown to any class in this course that opens these
+   *  ayahs, instead of only the lesson it was made in. */
+  kept: boolean;
   rule: TajweedRule | null;
   customLabel: string | null;
   style: TajweedAnnotationStyle;
@@ -226,6 +526,18 @@ export interface ClientToServerEvents {
   }) => void;
   /** Instructor clears one live annotation, or all of them when id is absent. */
   'tajweed:temporary:clear': (p: { sessionId: string; id?: string }) => void;
+  /**
+   * What the instructor has picked, before any rule is chosen.
+   *
+   * The class sees the same letters outlined while the teacher decides, which
+   * is what makes marking a shared act rather than a result. Nothing is stored:
+   * it lasts as long as the pick does.
+   */
+  'tajweed:pointing:set': (p: {
+    sessionId: string;
+    parts: TajweedPart[];
+  }) => void;
+  'tajweed:pointing:clear': (p: { sessionId: string }) => void;
 }
 
 export interface ServerToClientEvents {
@@ -275,6 +587,9 @@ export interface ServerToClientEvents {
     sessionId: string;
     annotations: TajweedTemporaryAnnotation[];
   }) => void;
+  /** What the instructor is pointing at right now; empty when nothing is
+   *  picked. Sent on join too, so a late arrival sees the same outline. */
+  'tajweed:pointing': (p: { sessionId: string; parts: TajweedPart[] }) => void;
 
   'leaderboard:update': (p: {
     sessionId: string;

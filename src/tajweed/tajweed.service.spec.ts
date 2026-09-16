@@ -21,6 +21,7 @@ const STUDENTS: Record<string, string> = {
   'student-1': 'Ahmad',
   'student-2': 'Bilal',
 };
+const SECTIONS = ['section-1', 'section-2'];
 
 const person = (over: Partial<JwtPayload>): JwtPayload => ({
   sub: 'teacher-1',
@@ -40,16 +41,30 @@ const outsideAdmin = person({
   organizationId: 'org-2',
 });
 
-type Row = Record<string, unknown> & { id: string; version: number };
+type PartRow = Record<string, unknown>;
+type Row = Record<string, unknown> & {
+  id: string;
+  version: number;
+  parts: PartRow[];
+};
 
-/** Every key of `where` matches the row (null included); OR is ignored. */
+/**
+ * Every key of `where` matches the row (null included). OR is honoured — the
+ * lesson scope is built from it, and "kept marks come back for the whole
+ * course" is exactly an OR branch, so ignoring it would test nothing.
+ */
 const matches = (
   row: Record<string, unknown>,
   where: Record<string, unknown>,
-) =>
-  Object.entries(where).every(
-    ([key, value]) => key === 'OR' || value === undefined || row[key] === value,
-  );
+): boolean =>
+  Object.entries(where).every(([key, value]) => {
+    if (key === 'OR') {
+      return (value as Record<string, unknown>[]).some((clause) =>
+        matches(row, clause),
+      );
+    }
+    return value === undefined || row[key] === value;
+  });
 
 /**
  * An in-memory Prisma, just deep enough for the service. Authorization is not
@@ -91,8 +106,8 @@ function setup() {
     section: {
       findFirst: jest.fn(
         async ({ where }: { where: { id: string; courseId: string } }) =>
-          where.id === 'section-1' && where.courseId === COURSE
-            ? { id: 'section-1' }
+          SECTIONS.includes(where.id) && where.courseId === COURSE
+            ? { id: where.id }
             : null,
       ),
     },
@@ -116,17 +131,27 @@ function setup() {
         async ({
           data,
         }: {
-          data: Record<string, unknown> & { id: string };
+          data: Record<string, unknown> & {
+            id: string;
+            parts?: { create: PartRow[] };
+          };
         }) => {
           const now = new Date();
+          const { parts, ...rest } = data;
           const row: Row = {
             sectionId: null,
             sessionId: null,
             studentId: null,
             hifzEntryId: null,
+            kept: false,
             createdAt: now,
             updatedAt: now,
-            ...data,
+            ...rest,
+            parts: (parts?.create ?? []).map((p, i) => ({
+              id: `part-${i}`,
+              annotationId: data.id,
+              ...p,
+            })),
             version: 1,
           };
           rows.set(row.id, row);
@@ -157,6 +182,25 @@ function setup() {
         const r = rows.get(where.id);
         rows.delete(where.id);
         return r;
+      }),
+    },
+    // Parts belong to their mark: they are replaced wholesale on an edit and
+    // go with it when it is deleted.
+    tajweedAnnotationPart: {
+      deleteMany: jest.fn(
+        async ({ where }: { where: { annotationId: string } }) => {
+          const row = rows.get(where.annotationId);
+          const count = row?.parts.length ?? 0;
+          if (row) row.parts = [];
+          return { count };
+        },
+      ),
+      createMany: jest.fn(async ({ data }: { data: PartRow[] }) => {
+        for (const part of data) {
+          const row = rows.get(part.annotationId as string);
+          if (row) row.parts.push({ id: `part-${row.parts.length}`, ...part });
+        }
+        return { count: data.length };
       }),
     },
     tajweedAnnotationRevision: {
@@ -202,17 +246,21 @@ function setup() {
   return { service, prisma, rows, revisions, broadcaster };
 }
 
+/** Al-Falaq 3 — "وَمِن شَرِّ غَاسِقٍ إِذَا وَقَبَ" — five words, so word 9 is not there. */
+const word = (ayahNumber: number, wordIndex: number) => ({
+  surahNumber: 113,
+  ayahNumber,
+  wordIndex,
+});
+
 const lesson = (
   over: Partial<CreateTajweedAnnotationDto> = {},
 ): CreateTajweedAnnotationDto => ({
   id: 'annotation-0001',
   mode: 'LESSON',
   sessionId: 'session-1',
-  surahNumber: 113,
-  ayahNumber: 3,
-  selection: 'WORD',
-  wordStart: 0,
-  rule: 'ikhfa',
+  parts: [word(3, 0)],
+  rule: 'nun.ikhfa_haqiqi',
   ...over,
 });
 
@@ -222,7 +270,7 @@ const correction = (over: Partial<CreateTajweedAnnotationDto> = {}) =>
     mode: 'STUDENT_CORRECTION',
     studentId: 'student-1',
     outcome: 'TAJWEED_ISSUE',
-    rule: 'qalqalah',
+    rule: 'qalqalah.kubra',
     ...over,
   });
 
@@ -233,8 +281,11 @@ describe('TajweedService', () => {
 
     expect(saved).toMatchObject({
       sectionId: 'section-1',
-      wordStart: 0,
-      wordEnd: 0,
+      surahNumber: 113,
+      ayahNumber: 3,
+      parts: [
+        { surahNumber: 113, ayahNumber: 3, wordIndex: 0, letterIndex: null },
+      ],
       version: 1,
     });
     expect(rows.get('annotation-0001')).toMatchObject({ organizationId: ORG });
@@ -248,6 +299,42 @@ describe('TajweedService', () => {
         annotation: expect.objectContaining({ id: 'annotation-0001' }),
       }),
     );
+  });
+
+  it('holds letters from two different ayahs as one mark, in reading order', async () => {
+    const { service } = setup();
+    const saved = await service.create(
+      teacher,
+      COURSE,
+      // Picked out of order, and across an ayah boundary: the rule lives on the
+      // last letter of one ayah and a letter of the next.
+      lesson({
+        parts: [
+          { surahNumber: 113, ayahNumber: 4, wordIndex: 1, letterIndex: 0 },
+          { surahNumber: 113, ayahNumber: 3, wordIndex: 4, letterIndex: 1 },
+        ],
+      }),
+    );
+
+    expect(saved.parts).toEqual([
+      { surahNumber: 113, ayahNumber: 3, wordIndex: 4, letterIndex: 1 },
+      { surahNumber: 113, ayahNumber: 4, wordIndex: 1, letterIndex: 0 },
+    ]);
+    // Filed under the first part, whatever order the teacher picked in.
+    expect(saved).toMatchObject({ surahNumber: 113, ayahNumber: 3 });
+  });
+
+  it('drops a part picked twice rather than marking it twice', async () => {
+    const { service } = setup();
+    const saved = await service.create(
+      teacher,
+      COURSE,
+      lesson({ parts: [word(3, 2), word(3, 2), word(3, 1)] }),
+    );
+    expect(saved.parts).toEqual([
+      { surahNumber: 113, ayahNumber: 3, wordIndex: 1, letterIndex: null },
+      { surahNumber: 113, ayahNumber: 3, wordIndex: 2, letterIndex: null },
+    ]);
   });
 
   it('refuses a student who tries to annotate', async () => {
@@ -271,14 +358,37 @@ describe('TajweedService', () => {
     );
   });
 
-  it("refuses a reference that is not in the Qur'an", async () => {
+  it("refuses a part that is not in the Qur'an", async () => {
     const { service } = setup();
     await expect(
-      service.create(teacher, COURSE, lesson({ ayahNumber: 6 })),
+      service.create(teacher, COURSE, lesson({ parts: [word(6, 0)] })),
     ).rejects.toThrow(/has no ayah 6/);
     await expect(
-      service.create(teacher, COURSE, lesson({ wordStart: 9 })),
+      service.create(teacher, COURSE, lesson({ parts: [word(3, 9)] })),
     ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      service.create(
+        teacher,
+        COURSE,
+        lesson({
+          parts: [
+            { surahNumber: 113, ayahNumber: 3, wordIndex: 0, letterIndex: 99 },
+          ],
+        }),
+      ),
+    ).rejects.toThrow(/letters/);
+    await expect(
+      service.create(
+        teacher,
+        COURSE,
+        lesson({
+          parts: [{ surahNumber: 113, ayahNumber: 3, letterIndex: 0 }],
+        }),
+      ),
+    ).rejects.toThrow(/letter needs the word/);
+    await expect(
+      service.create(teacher, COURSE, lesson({ parts: [] })),
+    ).rejects.toThrow(/Pick a word or a letter/);
   });
 
   it('refuses a session from outside the course', async () => {
@@ -304,6 +414,41 @@ describe('TajweedService', () => {
     expect(broadcaster.emitToSession).not.toHaveBeenCalled();
   });
 
+  it('brings a kept mark back in another lesson of the same course', async () => {
+    const { service } = setup();
+    await service.create(teacher, COURSE, lesson({ kept: true }));
+    await service.create(
+      teacher,
+      COURSE,
+      lesson({ id: 'annotation-0002', kept: false }),
+    );
+
+    // A different lesson entirely: only what the teacher chose to keep follows.
+    const next = await service.list(teacher, COURSE, {
+      sectionId: 'section-2',
+    });
+    expect(next.lesson.map((a) => a.id)).toEqual(['annotation-0001']);
+
+    // The lesson it was made in still shows both.
+    const same = await service.list(teacher, COURSE, {
+      sectionId: 'section-1',
+    });
+    expect(same.lesson.map((a) => a.id)).toEqual([
+      'annotation-0001',
+      'annotation-0002',
+    ]);
+  });
+
+  it('never keeps a correction for the whole course', async () => {
+    const { service } = setup();
+    const saved = await service.create(
+      teacher,
+      COURSE,
+      correction({ kept: true }),
+    );
+    expect(saved.kept).toBe(false);
+  });
+
   it('keeps lesson material and student corrections apart', async () => {
     const { service } = setup();
     await expect(
@@ -321,7 +466,7 @@ describe('TajweedService', () => {
     expect(saved).toMatchObject({
       studentId: 'student-1',
       outcome: 'TAJWEED_ISSUE',
-      rule: 'qalqalah',
+      rule: 'qalqalah.kubra',
     });
     expect(broadcaster.emitToSessionStaff).toHaveBeenCalledWith(
       'session-1',
@@ -348,6 +493,27 @@ describe('TajweedService', () => {
     expect(rows.size).toBe(1);
   });
 
+  it('replaces the parts of a mark when an edit sends new ones', async () => {
+    const { service } = setup();
+    await service.create(teacher, COURSE, lesson());
+
+    const edited = await service.update(teacher, COURSE, 'annotation-0001', {
+      version: 1,
+      parts: [word(3, 2), word(4, 0)],
+    });
+    expect(edited.parts).toEqual([
+      { surahNumber: 113, ayahNumber: 3, wordIndex: 2, letterIndex: null },
+      { surahNumber: 113, ayahNumber: 4, wordIndex: 0, letterIndex: null },
+    ]);
+
+    // An edit that says nothing about the parts leaves them alone.
+    const noted = await service.update(teacher, COURSE, 'annotation-0001', {
+      version: 2,
+      note: 'Hold it two counts',
+    });
+    expect(noted.parts).toHaveLength(2);
+  });
+
   it('refuses an edit made against an older version', async () => {
     const { service } = setup();
     await service.create(teacher, COURSE, lesson());
@@ -361,9 +527,19 @@ describe('TajweedService', () => {
     await expect(
       service.update(teacher, COURSE, 'annotation-0001', {
         version: 1,
-        rule: 'madd',
+        rule: 'madd.tabii',
       }),
     ).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  it('still accepts a rule saved before the taxonomy was grouped', async () => {
+    const { service } = setup();
+    const saved = await service.create(
+      teacher,
+      COURSE,
+      lesson({ rule: 'madd' }),
+    );
+    expect(saved.rule).toBe('madd');
   });
 
   it('keeps a record of what was deleted, and clears it for the class', async () => {
@@ -425,7 +601,7 @@ describe('TajweedService', () => {
       COURSE,
       'student-1',
     );
-    expect(byRule).toEqual({ qalqalah: { issues: 1, correct: 1 } });
+    expect(byRule).toEqual({ 'qalqalah.kubra': { issues: 1, correct: 1 } });
   });
 
   it('shows staff the whole class’s progress, and a student only their own', async () => {
@@ -442,7 +618,7 @@ describe('TajweedService', () => {
       expect.objectContaining({
         student: { id: 'student-1', name: 'Ahmad' },
         total: 2,
-        byRule: { qalqalah: { issues: 1, correct: 0 } },
+        byRule: { 'qalqalah.kubra': { issues: 1, correct: 0 } },
         byOutcome: { TAJWEED_ISSUE: 1, REPEAT: 1 },
       }),
       expect.objectContaining({

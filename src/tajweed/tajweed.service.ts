@@ -14,12 +14,18 @@ import {
 } from '@prisma/client';
 import type {
   TajweedAnnotation as TajweedAnnotationRow,
+  TajweedAnnotationPart as TajweedAnnotationPartRow,
   TajweedAnnotationStyle,
 } from '@prisma/client';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { CoursesService } from '../courses/courses.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { validateSelection, type SelectionRef } from '../quran/quran-words';
+import {
+  firstAyahOf,
+  validateParts,
+  type NormalizedPart,
+  type PartRef,
+} from '../quran/quran-words';
 import { RoomBroadcaster } from '../realtime/room-broadcaster';
 import type { TajweedAnnotation, TajweedRule } from '../shared';
 import { CreateTajweedAnnotationDto } from './dto/create-annotation.dto';
@@ -30,9 +36,21 @@ import { cleanText, isTajweedRule } from './tajweed-input';
 const STALE =
   'This annotation was changed somewhere else. Reload it and try again.';
 
+/** A mark is its parts, and they always come back in reading order. */
+const PARTS = { parts: { orderBy: { position: 'asc' as const } } };
+
+type AnnotationRow = TajweedAnnotationRow & {
+  parts: TajweedAnnotationPartRow[];
+};
+
 /**
  * Saved Tajweed annotations for a course: lesson material restored with its
  * lesson, and corrections recorded against one student's recitation.
+ *
+ * A mark points at the canonical text as a list of parts — a word here, a
+ * letter two words later, one in the ayah below — so a rule that lives between
+ * two letters of different words is one mark, not two. Nothing between two
+ * parts is implied.
  *
  * Live, temporary annotations are not here — they never touch the database and
  * belong to the room gateway. Everything here is teacher-driven: nothing is
@@ -53,6 +71,10 @@ export class TajweedService {
    * in it (or one student's, when asked). A student gets the lesson's
    * annotations and only their own corrections. A recorder films the lesson,
    * so it gets the lesson and nothing about any one student.
+   *
+   * Marks the teacher chose to keep come back for the whole course, whatever
+   * lesson they were made in: "keep for next time" means any class that opens
+   * those ayahs sees them.
    */
   async list(user: JwtPayload, courseId: string, q: ListTajweedAnnotationsDto) {
     const recorder = !!user.recorder;
@@ -67,8 +89,9 @@ export class TajweedService {
       where: {
         courseId,
         mode: TajweedAnnotationMode.LESSON,
-        ...(scope ? { OR: scope } : {}),
+        ...(scope ? { OR: [...scope, { kept: true }] } : {}),
       },
+      include: PARTS,
       orderBy: [
         { surahNumber: 'asc' },
         { ayahNumber: 'asc' },
@@ -76,7 +99,7 @@ export class TajweedService {
       ],
     });
 
-    let corrections: TajweedAnnotationRow[] = [];
+    let corrections: AnnotationRow[] = [];
     if (!recorder) {
       if (staff && q.studentId)
         await this.assertEnrolled(courseId, q.studentId);
@@ -94,6 +117,7 @@ export class TajweedService {
             mode: TajweedAnnotationMode.STUDENT_CORRECTION,
             ...who,
           },
+          include: PARTS,
           orderBy: { createdAt: 'desc' },
         });
       }
@@ -114,6 +138,7 @@ export class TajweedService {
     // A resend of a create that already landed returns what it made.
     const existing = await this.prisma.tajweedAnnotation.findUnique({
       where: { id: dto.id },
+      include: PARTS,
     });
     if (existing) return this.replay(existing, user, courseId);
 
@@ -127,7 +152,7 @@ export class TajweedService {
       );
     }
 
-    const ref = selection(dto);
+    const parts = checkParts(dto.parts);
     const content = contentOf(dto, dto.mode);
     if (dto.mode === TajweedAnnotationMode.LESSON) {
       if (dto.studentId || dto.hifzEntryId) {
@@ -172,11 +197,19 @@ export class TajweedService {
             mode: dto.mode,
             studentId: dto.studentId ?? null,
             hifzEntryId: dto.hifzEntryId ?? null,
-            ...ref,
+            // Only lesson material is kept for next time; a correction belongs
+            // to the student who earned it, not to the ayah.
+            kept:
+              dto.mode === TajweedAnnotationMode.LESSON
+                ? (dto.kept ?? false)
+                : false,
+            ...firstAyahOf(parts),
+            parts: { create: rowsFor(parts) },
             ...content,
             createdById: user.sub,
             updatedById: user.sub,
           },
+          include: PARTS,
         });
         await tx.tajweedAnnotationRevision.create({
           data: revision(created, TajweedChange.CREATED, user.sub),
@@ -193,6 +226,7 @@ export class TajweedService {
       ) {
         const raced = await this.prisma.tajweedAnnotation.findUnique({
           where: { id: dto.id },
+          include: PARTS,
         });
         if (raced) return this.replay(raced, user, courseId);
       }
@@ -213,15 +247,8 @@ export class TajweedService {
     }
     const notify = await this.notifySession(courseId, dto.sessionId, row);
 
-    const ref = selection({
-      surahNumber: dto.surahNumber ?? row.surahNumber,
-      ayahNumber: dto.ayahNumber ?? row.ayahNumber,
-      selection: dto.selection ?? row.selection,
-      wordStart: keep(dto.wordStart, row.wordStart),
-      wordEnd: keep(dto.wordEnd, row.wordEnd),
-      letterStart: keep(dto.letterStart, row.letterStart),
-      letterEnd: keep(dto.letterEnd, row.letterEnd),
-    });
+    // Parts are sent whole or not at all: what arrives replaces what is stored.
+    const parts = dto.parts ? checkParts(dto.parts) : null;
     const content = contentOf(
       {
         rule: keep(dto.rule, row.rule),
@@ -233,6 +260,10 @@ export class TajweedService {
       },
       row.mode,
     );
+    const kept =
+      row.mode === TajweedAnnotationMode.LESSON
+        ? keep(dto.kept, row.kept)
+        : false;
 
     const updated = await this.prisma.$transaction(async (tx) => {
       // Conditional on the version, so two edits racing past the check above
@@ -240,15 +271,25 @@ export class TajweedService {
       const { count } = await tx.tajweedAnnotation.updateMany({
         where: { id, courseId, version: dto.version },
         data: {
-          ...ref,
+          ...(parts ? firstAyahOf(parts) : {}),
           ...content,
+          kept,
           version: { increment: 1 },
           updatedById: user.sub,
         },
       });
       if (count === 0) throw new ConflictException(STALE);
+      if (parts) {
+        await tx.tajweedAnnotationPart.deleteMany({
+          where: { annotationId: id },
+        });
+        await tx.tajweedAnnotationPart.createMany({
+          data: rowsFor(parts).map((p) => ({ ...p, annotationId: id })),
+        });
+      }
       const next = await tx.tajweedAnnotation.findUniqueOrThrow({
         where: { id },
+        include: PARTS,
       });
       await tx.tajweedAnnotationRevision.create({
         data: revision(next, TajweedChange.UPDATED, user.sub),
@@ -269,6 +310,8 @@ export class TajweedService {
     const row = await this.find(courseId, id);
     const notify = await this.notifySession(courseId, sessionId, row);
     await this.prisma.$transaction([
+      // The parts go with it: they are pieces of this mark, not records of
+      // their own. The revision below keeps what it looked like.
       this.prisma.tajweedAnnotation.delete({ where: { id } }),
       this.prisma.tajweedAnnotationRevision.create({
         data: revision(row, TajweedChange.DELETED, user.sub),
@@ -315,6 +358,7 @@ export class TajweedService {
         mode: TajweedAnnotationMode.STUDENT_CORRECTION,
         studentId,
       },
+      include: PARTS,
       orderBy: { createdAt: 'desc' },
     });
     return { corrections: rows.map(toPublic), byRule: tallyByRule(rows) };
@@ -430,6 +474,7 @@ export class TajweedService {
         mode: TajweedAnnotationMode.STUDENT_CORRECTION,
         hifzEntryId: null,
       },
+      select: { id: true, version: true },
     });
     let linked = 0;
     for (const row of rows) {
@@ -445,6 +490,7 @@ export class TajweedService {
         if (count === 0) return;
         const next = await tx.tajweedAnnotation.findUniqueOrThrow({
           where: { id: row.id },
+          include: PARTS,
         });
         await tx.tajweedAnnotationRevision.create({
           data: revision(next, TajweedChange.UPDATED, entry.recordedById),
@@ -487,6 +533,7 @@ export class TajweedService {
   private async find(courseId: string, id: string) {
     const row = await this.prisma.tajweedAnnotation.findFirst({
       where: { id, courseId },
+      include: PARTS,
     });
     if (!row) {
       throw new NotFoundException('Annotation not found in this course');
@@ -494,11 +541,7 @@ export class TajweedService {
     return row;
   }
 
-  private replay(
-    row: TajweedAnnotationRow,
-    user: JwtPayload,
-    courseId: string,
-  ) {
+  private replay(row: AnnotationRow, user: JwtPayload, courseId: string) {
     if (row.courseId !== courseId || row.createdById !== user.sub) {
       throw new ConflictException('An annotation with that id already exists');
     }
@@ -556,7 +599,7 @@ export class TajweedService {
   private async notifySession(
     courseId: string,
     sessionId: string | undefined,
-    row: TajweedAnnotationRow,
+    row: AnnotationRow,
   ) {
     if (!sessionId) return row.sessionId;
     const session = await this.prisma.liveSession.findFirst({
@@ -573,7 +616,7 @@ export class TajweedService {
    *  one student's feedback never fans out to their classmates. */
   private announce(
     kind: 'created' | 'updated',
-    row: TajweedAnnotationRow,
+    row: AnnotationRow,
     sessionId: string | null,
   ) {
     if (!sessionId) return;
@@ -595,13 +638,18 @@ function keep<T>(next: T | undefined, stored: T): T {
   return next === undefined ? stored : next;
 }
 
-/** Check a reference against the real text; its message becomes a 400. */
-function selection(ref: SelectionRef) {
+/** Check the parts against the real text; the message becomes a 400. */
+function checkParts(parts: readonly PartRef[]): NormalizedPart[] {
   try {
-    return validateSelection(ref);
+    return validateParts(parts);
   } catch (e) {
     throw new BadRequestException((e as Error).message);
   }
+}
+
+/** Parts as rows, numbered so they come back in the order they were picked. */
+function rowsFor(parts: readonly NormalizedPart[]) {
+  return parts.map((part, position) => ({ ...part, position }));
 }
 
 /** Per rule: how many issues the teacher heard, and how many correct. */
@@ -662,7 +710,7 @@ function contentOf(
   };
 }
 
-function toPublic(row: TajweedAnnotationRow): TajweedAnnotation {
+function toPublic(row: AnnotationRow): TajweedAnnotation {
   return {
     id: row.id,
     courseId: row.courseId,
@@ -671,13 +719,15 @@ function toPublic(row: TajweedAnnotationRow): TajweedAnnotation {
     mode: row.mode,
     studentId: row.studentId,
     hifzEntryId: row.hifzEntryId,
+    kept: row.kept,
     surahNumber: row.surahNumber,
     ayahNumber: row.ayahNumber,
-    selection: row.selection,
-    wordStart: row.wordStart,
-    wordEnd: row.wordEnd,
-    letterStart: row.letterStart,
-    letterEnd: row.letterEnd,
+    parts: row.parts.map((p) => ({
+      surahNumber: p.surahNumber,
+      ayahNumber: p.ayahNumber,
+      wordIndex: p.wordIndex,
+      letterIndex: p.letterIndex,
+    })),
     rule: row.rule as TajweedRule | null,
     customLabel: row.customLabel,
     style: row.style,
@@ -693,7 +743,7 @@ function toPublic(row: TajweedAnnotationRow): TajweedAnnotation {
 }
 
 function revision(
-  row: TajweedAnnotationRow,
+  row: AnnotationRow,
   change: TajweedChange,
   changedById: string,
 ) {
