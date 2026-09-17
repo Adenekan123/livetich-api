@@ -18,6 +18,7 @@ import type { ObjectStorage } from '../storage/object-storage';
 import {
   PLUGIN_CODE_INSTRUCTION,
   PLUGIN_ISLAMIC_EDUCATION,
+  PLUGIN_MATHS_SCIENCES,
   PLUGIN_TEST_PREP,
 } from '../plugins/catalog';
 import { RecorderTokenService } from './recorder-token.service';
@@ -132,6 +133,7 @@ export class RecordingsService {
       packs: {
         islamicEducation: enabled.has(PLUGIN_ISLAMIC_EDUCATION),
         codeInstruction: enabled.has(PLUGIN_CODE_INSTRUCTION),
+        mathsSciences: enabled.has(PLUGIN_MATHS_SCIENCES),
         testPrep: enabled.has(PLUGIN_TEST_PREP),
       },
     };
