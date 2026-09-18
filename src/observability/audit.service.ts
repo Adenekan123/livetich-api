@@ -27,6 +27,8 @@ export const AuditAction = {
   // archived or an installation being revoked.
   GITHUB_ORG_CONNECTED: 'github.org.connected',
   GITHUB_ORG_DISCONNECTED: 'github.org.disconnected',
+  CODING_GITHUB_IDENTITY_CONNECTED: 'coding.github_identity.connected',
+  CODING_GITHUB_IDENTITY_DISCONNECTED: 'coding.github_identity.disconnected',
   CODING_WORKSPACE_CREATED: 'coding.workspace.created',
   CODING_WORKSPACE_ACCESS_GRANTED: 'coding.workspace.access_granted',
   CODING_WORKSPACE_FAILED: 'coding.workspace.failed',

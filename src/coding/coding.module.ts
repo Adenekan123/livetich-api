@@ -11,6 +11,8 @@ import { CodingWorkspaceController } from './git/coding-workspace.controller';
 import { CodingWorkspaceService } from './git/coding-workspace.service';
 import { GitHubConnectionController } from './git/github-connection.controller';
 import { GitHubConnectionService } from './git/github-connection.service';
+import { GitHubIdentityController } from './git/github-identity.controller';
+import { GitHubIdentityService } from './git/github-identity.service';
 
 /**
  * Coding Instructor Plugin. Covers assignment authoring & delivery, the ZIP
@@ -26,6 +28,7 @@ import { GitHubConnectionService } from './git/github-connection.service';
     CodingController,
     CodingWorkspaceController,
     GitHubConnectionController,
+    GitHubIdentityController,
   ],
   providers: [
     CodingService,
@@ -35,6 +38,7 @@ import { GitHubConnectionService } from './git/github-connection.service';
     CodingLiveService,
     CodingWorkspaceService,
     GitHubConnectionService,
+    GitHubIdentityService,
   ],
   exports: [
     CodingService,
