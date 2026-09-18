@@ -9,6 +9,8 @@ import { CodingInstructorService } from './coding-instructor.service';
 import { CodingLiveService } from './coding-live.service';
 import { CodingWorkspaceController } from './git/coding-workspace.controller';
 import { CodingWorkspaceService } from './git/coding-workspace.service';
+import { GitHubConnectionController } from './git/github-connection.controller';
+import { GitHubConnectionService } from './git/github-connection.service';
 
 /**
  * Coding Instructor Plugin. Covers assignment authoring & delivery, the ZIP
@@ -20,7 +22,11 @@ import { CodingWorkspaceService } from './git/coding-workspace.service';
  */
 @Module({
   imports: [CoursesModule, GitHubModule],
-  controllers: [CodingController, CodingWorkspaceController],
+  controllers: [
+    CodingController,
+    CodingWorkspaceController,
+    GitHubConnectionController,
+  ],
   providers: [
     CodingService,
     CodingSubmissionsService,
@@ -28,6 +34,7 @@ import { CodingWorkspaceService } from './git/coding-workspace.service';
     CodingInstructorService,
     CodingLiveService,
     CodingWorkspaceService,
+    GitHubConnectionService,
   ],
   exports: [
     CodingService,

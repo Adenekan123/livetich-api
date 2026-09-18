@@ -144,10 +144,70 @@ export class GitHubAppService {
     return body.token;
   }
 
+  /**
+   * Look up an installation as the app itself.
+   *
+   * This is the one call that must not use an installation token, because it
+   * is what establishes whether an installation is real and whose it is. When
+   * an org owner finishes installing, GitHub sends the browser back carrying an
+   * `installation_id` — a number the client could simply make up. Connecting on
+   * that alone would let anyone bind their workspace to another organisation's
+   * installation, so the id is always resolved here first (§44).
+   */
+  async getInstallation(
+    installationId: string,
+  ): Promise<InstallationInfo | null> {
+    this.assertConfigured();
+    const res = await fetch(
+      `${GITHUB_API}/app/installations/${encodeURIComponent(installationId)}`,
+      {
+        headers: {
+          Authorization: `Bearer ${this.appJwt()}`,
+          Accept: 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+      },
+    );
+    if (res.status === 404) return null;
+    if (!res.ok) {
+      const reason = await safeReason(res);
+      this.log.error(
+        `Installation lookup failed for ${installationId}: ${res.status} ${reason}`,
+      );
+      throw new ServiceUnavailableException(
+        'GitHub could not confirm that installation',
+      );
+    }
+    const body = (await res.json()) as {
+      id?: number;
+      suspended_at?: string | null;
+      account?: { login?: string; id?: number; type?: string } | null;
+    };
+    if (!body?.account?.login) return null;
+    return {
+      id: String(body.id ?? installationId),
+      accountLogin: body.account.login,
+      accountId: body.account.id != null ? String(body.account.id) : null,
+      accountType: body.account.type ?? null,
+      suspended: Boolean(body.suspended_at),
+    };
+  }
+
   /** Drop a cached token — used when GitHub rejects it mid-flight. */
   forget(installationId: string): void {
     this.tokens.delete(installationId);
   }
+}
+
+/** An installation as GitHub describes it, reduced to what Livetich stores. */
+export interface InstallationInfo {
+  id: string;
+  /** The organisation (or user) the app was installed on. */
+  accountLogin: string;
+  accountId: string | null;
+  /** "Organization" or "User" — a personal account is refused on connect. */
+  accountType: string | null;
+  suspended: boolean;
 }
 
 /** A .pem pasted into an env var usually arrives with escaped newlines. */
