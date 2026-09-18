@@ -24,6 +24,7 @@ import { CreateCodingAssignmentDto } from './dto/create-coding-assignment.dto';
 import { DecisionDto } from './dto/decision.dto';
 import { CreateFeedbackDto } from './dto/feedback.dto';
 import { LaunchAssignmentDto } from './dto/launch-assignment.dto';
+import { SubmitCommitDto } from './dto/submit-commit.dto';
 import { UpdateCodingAssignmentDto } from './dto/update-coding-assignment.dto';
 
 /** Multer memory-storage file (subset) — avoids a hard Express type dependency. */
@@ -128,6 +129,30 @@ export class CodingController {
     // Kick off the AI review in the background if the assignment opts in.
     void this.aiReview.maybeAutoReview(result.submission.id);
     return result;
+  }
+
+  /**
+   * Submit by pinning a commit in the student's workspace (§19, §21).
+   *
+   * The Git counterpart of the upload above: same attempt rules, same review
+   * pipeline, but what is recorded is a commit in the student's own repository
+   * rather than a copy of their files.
+   */
+  @Post('assignments/:id/submit-commit')
+  @Roles(Role.STUDENT)
+  submitCommit(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Body() dto: SubmitCommitDto,
+  ) {
+    // Deliberately does NOT start an AI review yet, unlike the archive path.
+    // The reviewer reads a submission's source from object storage by archive
+    // key, and a commit-backed attempt has no archive — so it would review zero
+    // files and still return a confident score and per-requirement verdicts.
+    // A review of nothing that reads like a review of the work is exactly what
+    // §25 forbids. Reading the commit (and its diff against the previous
+    // attempt, §26) is Phase 6; until then these wait for the instructor.
+    return this.submissions.submitCommit(user, id, dto);
   }
 
   /** Manager re-runs the AI review for a submission. */

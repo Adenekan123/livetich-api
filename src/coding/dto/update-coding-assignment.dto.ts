@@ -7,6 +7,7 @@ import {
   IsISO8601,
   IsOptional,
   IsString,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -49,6 +50,16 @@ export class UpdateCodingAssignmentDto {
   @IsString()
   @MaxLength(40)
   difficulty?: string;
+
+  /** Where the work lives in the repository. Correctable after creation —
+   *  an instructor who mistypes it must not have to recreate the task. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  @Matches(/^(?!\/)(?!.*\.\.)[A-Za-z0-9._\-/]+$/, {
+    message: 'Use a path inside the repository, like assignments/todo-api',
+  })
+  workspacePath?: string;
 
   @IsOptional()
   @IsISO8601()
