@@ -21,6 +21,7 @@ import type { ObjectStorage } from '../storage/object-storage';
 import { GitHubApiService } from '../github/github-api.service';
 import { AuditAction, AuditService } from '../observability/audit.service';
 import { CodingLiveService } from './coding-live.service';
+import { CommitViewService } from './git/commit-view.service';
 import { SubmitCommitDto } from './dto/submit-commit.dto';
 import { forStudent } from './ai-visibility';
 import {
@@ -63,6 +64,7 @@ export class CodingSubmissionsService {
     private readonly courses: CoursesService,
     private readonly live: CodingLiveService,
     private readonly github: GitHubApiService,
+    private readonly commits: CommitViewService,
     private readonly audit: AuditService,
     @Inject(OBJECT_STORAGE) private readonly storage: ObjectStorage,
   ) {}
@@ -307,6 +309,17 @@ export class CodingSubmissionsService {
     );
   }
 
+  /**
+   * The submitted commit and what changed in it (§27).
+   *
+   * Null for an upload-backed submission — the caller falls back to the file
+   * list on the detail above rather than showing an empty browser.
+   */
+  async getCommitView(user: JwtPayload, submissionId: string) {
+    await this.assertAccess(user, submissionId);
+    return this.commits.forSubmission(submissionId);
+  }
+
   /** Stream the stored archive for download (owner or manager). */
   async streamArchive(user: JwtPayload, submissionId: string) {
     await this.assertAccess(user, submissionId);
@@ -315,11 +328,24 @@ export class CodingSubmissionsService {
     return stream;
   }
 
-  /** One file's text content from the stored archive (review viewer). */
+  /**
+   * One file's text content for the review viewer.
+   *
+   * Two storage shapes behind one call: a commit-backed submission reads from
+   * GitHub at the exact submitted commit, an uploaded one from the stored
+   * archive. Clicking a file is the same gesture in the panel either way, so
+   * the caller is not made to know which kind it is looking at.
+   */
   async getFileContent(user: JwtPayload, submissionId: string, path: string) {
     await this.assertAccess(user, submissionId);
+
+    const fromCommit = await this.commits.fileAt(submissionId, path);
+    if (fromCommit) return fromCommit;
+
+    // A commit-backed submission has no archive at all, so "archive not found"
+    // would be a misleading way to say "that file isn't readable".
     const buffer = await this.storage.get(archiveKey(submissionId));
-    if (!buffer) throw new NotFoundException('Archive not found');
+    if (!buffer) throw new NotFoundException('File not found or not readable');
     const file = readOneTextFile(buffer, path);
     if (!file) throw new NotFoundException('File not found or not readable');
     return file;

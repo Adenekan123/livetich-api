@@ -13,8 +13,18 @@
  * will confidently mark absent requirements as failed (§25).
  */
 
-/** Files whose contents are never worth sending to a reviewer. */
-const SKIP_DIRECTORIES = new Set([
+/**
+ * Directories that are never the student's own work — dependencies, build
+ * output, the repository's own metadata.
+ *
+ * Exported because the instructor's file browser needs the same exclusion: a
+ * repository with `node_modules` committed would otherwise list thousands of
+ * entries and bury the handful of files the student actually wrote. Only this
+ * set is shared — the lockfile and extension filters below are about what is
+ * worth spending an AI budget on, which is a different question from what a
+ * human may want to click.
+ */
+export const SKIP_DIRECTORIES = new Set([
   'node_modules',
   'dist',
   'build',

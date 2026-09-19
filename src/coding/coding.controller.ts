@@ -168,7 +168,20 @@ export class CodingController {
     return this.submissions.getSubmission(user, id);
   }
 
-  /** One file's text content from the submitted archive (review viewer). */
+  /**
+   * The submitted commit and what changed in it.
+   *
+   * Deliberately its own endpoint rather than part of the detail above: this
+   * one talks to GitHub, and a student polling their own submission should not
+   * have the whole view fail because GitHub is slow. Returns null for an
+   * upload-backed submission, whose files come from the archive instead.
+   */
+  @Get('submissions/:id/commit')
+  submissionCommit(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.submissions.getCommitView(user, id);
+  }
+
+  /** One file's text content — from the commit, or the archive (review viewer). */
   @Get('submissions/:id/file')
   fileContent(
     @CurrentUser() user: JwtPayload,

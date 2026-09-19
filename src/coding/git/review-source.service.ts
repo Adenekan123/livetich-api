@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { GitHubConnectionStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { GitHubApiService } from '../../github/github-api.service';
+import { resolveCommitRef } from './commit-ref';
 import { AI_TEXT_BUDGET_BYTES } from '../coding-submissions.service';
 import {
   isReviewable,
@@ -37,62 +37,20 @@ export class ReviewSourceService {
     submissionId: string,
     budgetBytes = AI_TEXT_BUDGET_BYTES,
   ): Promise<ReviewSource | null> {
-    const submission = await this.prisma.codingSubmission.findUnique({
-      where: { id: submissionId },
-      select: {
-        id: true,
-        commitSha: true,
-        assignmentId: true,
-        studentId: true,
-        attemptNumber: true,
-        workspace: {
-          select: {
-            githubRepositoryFullName: true,
-            course: { select: { organizationId: true } },
-          },
-        },
-      },
-    });
-    if (!submission?.commitSha || !submission.workspace) return null;
+    const resolved = await resolveCommitRef(this.prisma, submissionId, (m) =>
+      this.log.warn(m),
+    );
+    if (!resolved) return null;
 
-    const fullName = submission.workspace.githubRepositoryFullName;
-    const orgId = submission.workspace.course.organizationId;
-    if (!fullName || !orgId) return null;
+    const ref = { owner: resolved.owner, repo: resolved.repo };
+    const installationId = resolved.installationId;
 
-    const connection =
-      await this.prisma.gitHubOrganizationConnection.findUnique({
-        where: { organizationId: orgId },
-      });
-    if (!connection || connection.status !== GitHubConnectionStatus.ACTIVE) {
-      this.log.warn(
-        `No active GitHub connection for submission ${submissionId}; cannot read its commit`,
-      );
-      return null;
-    }
-
-    const [owner, repo] = fullName.split('/');
-    const ref = { owner, repo };
-    const installationId = connection.githubInstallationId;
-
-    // The attempt before this one, if it was also commit-backed. Attempts are
-    // numbered per student per assignment, so "the previous attempt" is exact.
-    const previous = await this.prisma.codingSubmission.findFirst({
-      where: {
-        assignmentId: submission.assignmentId,
-        studentId: submission.studentId,
-        attemptNumber: { lt: submission.attemptNumber },
-        commitSha: { not: null },
-      },
-      orderBy: { attemptNumber: 'desc' },
-      select: { commitSha: true },
-    });
-
-    if (previous?.commitSha) {
+    if (resolved.previousSha) {
       const diff = await this.readDiff(
         installationId,
         ref,
-        previous.commitSha,
-        submission.commitSha,
+        resolved.previousSha,
+        resolved.sha,
         budgetBytes,
       );
       // A compare can fail if the earlier commit is gone — rewritten history,
@@ -101,16 +59,11 @@ export class ReviewSourceService {
       // never sent.
       if (diff) return diff;
       this.log.warn(
-        `Could not diff ${previous.commitSha.slice(0, 8)}..${submission.commitSha.slice(0, 8)}; reading the full tree instead`,
+        `Could not diff ${resolved.previousSha.slice(0, 8)}..${resolved.sha.slice(0, 8)}; reading the full tree instead`,
       );
     }
 
-    return this.readFull(
-      installationId,
-      ref,
-      submission.commitSha,
-      budgetBytes,
-    );
+    return this.readFull(installationId, ref, resolved.sha, budgetBytes);
   }
 
   /** Convenience for the reviewer: the rendered block, or null. */
