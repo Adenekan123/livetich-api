@@ -44,6 +44,13 @@ export interface WorkspaceSummary {
   repositoryFullName: string | null;
 }
 
+/**
+ * How long a workspace may sit in PROVISIONING before another Start may take
+ * it over. Creating a repository takes a couple of seconds; anything still
+ * claimed minutes later was abandoned by a crash or a restart.
+ */
+const STALE_PROVISIONING_MS = 5 * 60_000;
+
 /** What the editor is told. Deliberately not the whole row. */
 export interface WorkspaceView {
   status: CodingWorkspaceStatus;
@@ -223,9 +230,26 @@ export class CodingWorkspaceService {
     const claimed = await this.prisma.codingEnrollmentWorkspace.updateMany({
       where: {
         id: existing.id,
-        status: {
-          in: [CodingWorkspaceStatus.NOT_CREATED, CodingWorkspaceStatus.ERROR],
-        },
+        OR: [
+          {
+            status: {
+              in: [
+                CodingWorkspaceStatus.NOT_CREATED,
+                CodingWorkspaceStatus.ERROR,
+              ],
+            },
+          },
+          // A PROVISIONING row older than this was stranded rather than being
+          // worked on: the server was restarted or died between claiming the
+          // work and recording the result. Without this the student's
+          // workspace could never be started again, because nothing else ever
+          // moves that status back. A genuine concurrent Start finishes in
+          // seconds, so it is never caught by this.
+          {
+            status: CodingWorkspaceStatus.PROVISIONING,
+            updatedAt: { lt: new Date(Date.now() - STALE_PROVISIONING_MS) },
+          },
+        ],
       },
       data: { status: CodingWorkspaceStatus.PROVISIONING, lastError: null },
     });

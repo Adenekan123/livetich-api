@@ -39,16 +39,57 @@ export class CoursesService {
   /** Org admin creates a course for their org; may assign an instructor now. */
   async createCourse(user: JwtPayload, dto: CreateCourseDto) {
     const orgId = this.orgOf(user);
-    const { instructorId, ...rest } = dto;
+    const { instructorId, code, ...rest } = dto;
     if (instructorId) await this.assertOrgInstructor(orgId, instructorId);
+    const normalized = code ? code.trim().toUpperCase() : null;
+    if (normalized) await this.assertCodeAvailable(orgId, null, normalized);
     return this.prisma.course.create({
       data: {
         ...rest,
+        code: normalized,
         organizationId: orgId,
         instructorId: instructorId ?? null,
         ...this.cohortOverrides(dto),
       },
     });
+  }
+
+  /**
+   * Refuse a code that is already taken, with a sentence rather than a
+   * constraint violation.
+   *
+   * For an intake the database also enforces this, scoped to the program. For a
+   * *program* it cannot: a program has no parent, and MySQL treats NULLs as
+   * distinct in a unique index, so two programs could both be "FE" as far as
+   * the index is concerned — and every repository name built from them would
+   * then be ambiguous between the two.
+   *
+   * Codes are compared uppercased because repository names are lowercased
+   * downstream: "fe" and "FE" are the same repository, so they are the same
+   * code.
+   */
+  private async assertCodeAvailable(
+    organizationId: string,
+    parentCourseId: string | null,
+    code: string,
+    exceptCourseId?: string,
+  ): Promise<void> {
+    const clash = await this.prisma.course.findFirst({
+      where: {
+        organizationId,
+        parentCourseId,
+        code,
+        ...(exceptCourseId ? { id: { not: exceptCourseId } } : {}),
+      },
+      select: { id: true, title: true },
+    });
+    if (clash) {
+      throw new BadRequestException(
+        parentCourseId
+          ? `"${code}" is already the code for another intake of this program`
+          : `"${code}" is already the code for "${clash.title}"`,
+      );
+    }
   }
 
   /**
@@ -103,11 +144,17 @@ export class CoursesService {
         ? Array.from(new Set(dto.meetingDays)).sort((a, b) => a - b)
         : program.meetingDays;
 
+    // An intake code is the batch's own, and is checked against its siblings
+    // rather than the whole workspace — see assertCodeAvailable.
+    const batchCode = dto.code ? dto.code.trim().toUpperCase() : null;
+    if (batchCode) await this.assertCodeAvailable(orgId, program.id, batchCode);
+
     return this.prisma.$transaction(async (tx) => {
       const batch = await tx.course.create({
         data: {
           organizationId: orgId,
           parentCourseId: program.id,
+          code: batchCode,
           instructorId: dto.instructorId ?? program.instructorId ?? null,
           title,
           description: program.description,
@@ -464,7 +511,32 @@ export class CoursesService {
 
   async updateCourse(user: JwtPayload, id: string, dto: UpdateCourseDto) {
     await this.assertCanManageCourse(user, id);
-    const { instructorId, ...rest } = dto;
+    // instructorId is destructured to keep it *out* of `rest`, and is
+    // deliberately never read: reassigning a course's instructor goes through
+    // assignInstructor, which verifies the person is an active instructor in
+    // this org. Letting it through here would bypass that check entirely.
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { instructorId, code, ...rest } = dto;
+
+    // A code change has to be checked against the course's own level of the
+    // tree — its siblings for an intake, the workspace's programs otherwise.
+    let codeUpdate: { code?: string | null } = {};
+    if (code !== undefined) {
+      const current = await this.prisma.course.findUnique({
+        where: { id },
+        select: { organizationId: true, parentCourseId: true },
+      });
+      const normalized = code ? code.trim().toUpperCase() : null;
+      if (normalized && current?.organizationId) {
+        await this.assertCodeAvailable(
+          current.organizationId,
+          current.parentCourseId,
+          normalized,
+          id,
+        );
+      }
+      codeUpdate = { code: normalized };
+    }
     const dtoRec = dto as Record<string, unknown>;
     const scheduleChanged = CoursesService.SCHEDULE_FIELDS.some(
       (f) => dtoRec[f] !== undefined,
@@ -473,6 +545,7 @@ export class CoursesService {
       where: { id },
       data: {
         ...rest,
+        ...codeUpdate,
         ...this.cohortOverrides(dto),
         ...(scheduleChanged ? { scheduleUpdatedAt: new Date() } : {}),
       },

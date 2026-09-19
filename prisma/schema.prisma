@@ -344,7 +344,15 @@ model Course {
   /// Set on a *batch*: one workspace per enrolled coding student.
   codingWorkspaces    CodingEnrollmentWorkspace[]
 
-  @@unique([organizationId, code])
+  /// Intake codes are unique within their program, not across the workspace:
+  /// two programs both running a September 2026 cohort is ordinary, and the
+  /// earlier workspace-wide constraint refused the second one.
+  ///
+  /// This does NOT constrain *program* codes, because a program has no parent
+  /// and MySQL treats NULLs as distinct — so two programs could both be "FE"
+  /// as far as the database is concerned, and their repository names would
+  /// then collide. CoursesService enforces that half (see assertCodeAvailable).
+  @@unique([organizationId, parentCourseId, code])
   @@index([instructorId])
   @@index([organizationId])
   @@index([parentCourseId])
