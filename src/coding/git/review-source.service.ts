@@ -54,15 +54,32 @@ export class ReviewSourceService {
         resolved.sha,
         budgetBytes,
       );
-      // A compare can fail if the earlier commit is gone — rewritten history,
-      // or a repository recreated. Reviewing the whole tree is then correct;
-      // an empty diff would invite failing requirements whose code was simply
-      // never sent.
-      if (diff) return diff;
+      // Two different things end up here, and the second was a real bug.
+      //
+      // A compare can fail outright — the earlier commit is gone, history was
+      // rewritten, the repository was recreated.
+      //
+      // Or it can succeed with nothing in it, which is what happens when a
+      // student submits the identical commit twice. That handed the reviewer an
+      // empty source and the words "no readable source files were found" — a
+      // sentence that reads like the pipeline broke, and invites the model to
+      // fail every requirement on work that may be perfectly good.
+      //
+      // Neither is reviewable, so both fall through and judge the work as it
+      // stands. A patch with no readable body still counts as a real diff.
+      if (diff && (diff.files.length > 0 || diff.patches.length > 0)) {
+        return diff;
+      }
       this.log.warn(
-        `Could not diff ${resolved.previousSha.slice(0, 8)}..${resolved.sha.slice(0, 8)}; reading the full tree instead`,
+        diff
+          ? `Attempt ${resolved.attemptNumber} is identical to ${resolved.previousSha.slice(0, 8)}; reviewing the work as it stands`
+          : `Could not diff ${resolved.previousSha.slice(0, 8)}..${resolved.sha.slice(0, 8)}; reading the full tree instead`,
       );
-    } else if (resolved.templateRepo) {
+    }
+
+    // Not `else`: a resubmission whose diff was empty should still be measured
+    // against the starting code rather than dumped on the reviewer whole.
+    if (resolved.templateRepo) {
       // A first attempt on a program with starting code. Reading the whole
       // repository here is how the reviewer went blind on a large project: a
       // Next.js tree overruns the budget long before the student's own files

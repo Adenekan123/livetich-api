@@ -115,14 +115,21 @@ export class CommitViewService {
 
     if (ref.previousSha) {
       const diff = await this.readDiff(ref, repoRef, base);
-      if (diff) return diff;
-      // A compare fails when the earlier commit is gone — rewritten history, or
-      // a repository recreated. Falling through is correct; an empty diff would
-      // read as "this student changed nothing".
+      // A compare can fail outright, or succeed with nothing in it when a
+      // student submits the identical commit twice. An empty "Changed files"
+      // list tells the instructor nothing either way, so both fall through to
+      // something that does.
+      if (diff && diff.files.length > 0) return diff;
       this.log.warn(
-        `Could not compare ${ref.previousSha.slice(0, 8)}..${ref.sha.slice(0, 8)}; listing the tree instead`,
+        diff
+          ? `Attempt ${ref.attemptNumber} is identical to ${ref.previousSha.slice(0, 8)}; showing the work instead`
+          : `Could not compare ${ref.previousSha.slice(0, 8)}..${ref.sha.slice(0, 8)}; listing the tree instead`,
       );
-    } else if (ref.templateRepo) {
+    }
+
+    // Not `else`: a resubmission with an empty diff is still better shown
+    // against the starting code than as the whole repository.
+    if (ref.templateRepo) {
       const against = await this.readAgainstTemplate(ref, repoRef, base);
       if (against) return against;
       this.log.warn(
