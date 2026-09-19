@@ -4,7 +4,12 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { GitHubConnectionStatus, Prisma, Role } from '@prisma/client';
+import {
+  CodingSubmissionMode,
+  GitHubConnectionStatus,
+  Prisma,
+  Role,
+} from '@prisma/client';
 import type { JwtPayload } from '../../auth/jwt-payload';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CoursesService } from '../../courses/courses.service';
@@ -204,7 +209,12 @@ export class GitHubConnectionService {
 
     const course = await this.prisma.course.findUnique({
       where: { id: courseId },
-      select: { id: true, parentCourseId: true, title: true },
+      select: {
+        id: true,
+        parentCourseId: true,
+        title: true,
+        codingSubmissionMode: true,
+      },
     });
     if (!course) throw new NotFoundException('Program not found');
     if (course.parentCourseId) {
@@ -213,12 +223,42 @@ export class GitHubConnectionService {
       );
     }
 
+    // The mode is written first, and deliberately before the connection check:
+    // UPLOAD exists so that a workshop needs no GitHub at all, and demanding a
+    // connection in order to say "this program needs no connection" would be
+    // the setting refusing to let itself be set.
+    if (dto.submissionMode) {
+      await this.prisma.course.update({
+        where: { id: courseId },
+        data: { codingSubmissionMode: dto.submissionMode },
+      });
+    }
+
+    // An upload program has no repositories, so there is nothing further to
+    // configure and nothing to connect. Returning the program's own row keeps
+    // the caller's shape honest: there is no git config, because there is no
+    // git.
+    if (dto.submissionMode === 'UPLOAD') {
+      return this.prisma.codingProgramGitConfig.findUnique({
+        where: { courseId },
+      });
+    }
+
     const connection =
       await this.prisma.gitHubOrganizationConnection.findUnique({
         where: { organizationId: orgId },
       });
     if (!connection || connection.status !== GitHubConnectionStatus.ACTIVE) {
       throw new BadRequestException('Connect a GitHub organisation first');
+    }
+
+    // Reaching here means this program provisions repositories, whether the
+    // caller said so explicitly or is configuring one that already did.
+    if (!dto.submissionMode && course.codingSubmissionMode === null) {
+      await this.prisma.course.update({
+        where: { id: courseId },
+        data: { codingSubmissionMode: CodingSubmissionMode.GIT },
+      });
     }
 
     // A template that does not exist would fail at the worst moment — when a
@@ -432,6 +472,7 @@ export class GitHubConnectionService {
         title: true,
         code: true,
         organizationId: true,
+        codingSubmissionMode: true,
         gitConfig: {
           select: { templateRepositoryName: true, defaultBranch: true },
         },
@@ -473,6 +514,7 @@ export class GitHubConnectionService {
       code: p.code,
       templateRepositoryName: p.gitConfig?.templateRepositoryName ?? null,
       defaultBranch: p.gitConfig?.defaultBranch ?? 'main',
+      submissionMode: p.codingSubmissionMode,
       configured: Boolean(p.gitConfig),
       connected: p.organizationId ? (live.get(p.organizationId) ?? false) : false,
     }));

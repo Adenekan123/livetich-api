@@ -339,6 +339,14 @@ model Course {
   codingAssignments   CodingAssignment[]
   recordings          Recording[]
   tajweedAnnotations  TajweedAnnotation[]
+  /// Set on a *program* (parent course): how its students hand work in, and so
+  /// whether this is a coding program at all. Null = not one.
+  ///
+  /// Deliberately here and not on CodingProgramGitConfig, whose `connectionId`
+  /// is required: a config row cannot exist without a GitHub connection, so
+  /// putting the mode there would force GitHub setup on an upload-only
+  /// workshop — the exact thing UPLOAD exists to avoid.
+  codingSubmissionMode CodingSubmissionMode?
   /// Set on a *program* (parent course): how its student repositories are made.
   gitConfig           CodingProgramGitConfig?
   /// Set on a *batch*: one workspace per enrolled coding student.
@@ -1101,6 +1109,25 @@ enum CodingAssignmentStatus {
 enum CodingAssignmentKind {
   LIVE
   ASSIGNMENT
+}
+
+/// How a coding program's students hand work in.
+///
+/// GIT is the full experience: a private repository per enrolment, Save and
+/// Submit as buttons, a submission pinned to a commit. It needs a connected
+/// GitHub organisation and, for large projects, starting code.
+///
+/// UPLOAD is a project .zip and nothing else. It exists because the git setup
+/// costs more than a two-hour workshop is worth, and because a school on locked
+/// -down machines may never be able to do it. The review pipeline is unchanged:
+/// a submission's files are read from the archive instead of from a commit.
+///
+/// The distinction is stored rather than inferred from whether a program has a
+/// git config, because "deliberately upload-only" and "half-configured" need to
+/// say different things to a student, and an absent row cannot tell them apart.
+enum CodingSubmissionMode {
+  GIT
+  UPLOAD
 }
 
 /// A submission's place in the review pipeline (no test/sandbox stages).

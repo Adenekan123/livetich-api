@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  CodingSubmissionMode,
   CodingWorkspaceStatus,
   GitHubConnectionStatus,
   Prisma,
@@ -62,6 +63,12 @@ export interface WorkspaceView {
   blockedReason: string | null;
   courseTitle: string;
   programTitle: string;
+  /**
+   * How work is handed in. The editor uses this to stop offering "Start coding
+   * workspace" on an upload program at all — a button whose only possible
+   * outcome is an explanation is worse than no button.
+   */
+  submissionMode: CodingSubmissionMode | null;
 }
 
 @Injectable()
@@ -417,6 +424,7 @@ export class CodingWorkspaceService {
       templateRepositoryName: gitConfig?.templateRepositoryName ?? null,
       defaultBranch: gitConfig?.defaultBranch ?? 'main',
       hasGitConfig: Boolean(gitConfig),
+      submissionMode: program.codingSubmissionMode,
       connectionLogin: connection?.githubOrganizationLogin ?? '',
       installationId: connection?.githubInstallationId ?? '',
       connectionActive: connection?.status === GitHubConnectionStatus.ACTIVE,
@@ -431,6 +439,12 @@ export class CodingWorkspaceService {
    * connect their account, or message their instructor.
    */
   private blockedReason(ctx: WorkspaceContext): string | null {
+    // An upload program has no repository by design. Telling this student that
+    // their instructor "needs to finish connecting it" was simply untrue, and
+    // sent them chasing someone who had already made the right choice.
+    if (ctx.submissionMode === CodingSubmissionMode.UPLOAD) {
+      return 'This program hands work in as a file — there is no workspace to start. Use Submit to upload your project.';
+    }
     if (!ctx.hasGitConfig) {
       return 'This program is not set up for coding yet — your instructor needs to finish connecting it.';
     }
@@ -465,6 +479,7 @@ export class CodingWorkspaceService {
       blockedReason,
       courseTitle: ctx.courseTitle,
       programTitle: ctx.programTitle,
+      submissionMode: ctx.submissionMode,
     };
   }
 }
@@ -492,6 +507,12 @@ interface WorkspaceContext {
   templateRepositoryName: string | null;
   defaultBranch: string;
   hasGitConfig: boolean;
+  /**
+   * How this program's students hand work in. Null means the program was never
+   * set up for coding at all — which is a different thing from being set up for
+   * uploads, and has to say so.
+   */
+  submissionMode: CodingSubmissionMode | null;
   connectionLogin: string;
   installationId: string;
   connectionActive: boolean;

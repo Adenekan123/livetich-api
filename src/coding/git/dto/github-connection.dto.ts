@@ -1,4 +1,10 @@
-import { IsOptional, IsString, Matches, MaxLength } from 'class-validator';
+import {
+  IsIn,
+  IsOptional,
+  IsString,
+  Matches,
+  MaxLength,
+} from 'class-validator';
 
 /**
  * Finish connecting a GitHub organisation.
@@ -33,6 +39,20 @@ export class CreateStarterDto {
 }
 
 export class ConfigureProgramGitDto {
+  /**
+   * How this program's students hand work in.
+   *
+   * GIT needs a connected organisation and gives each student a repository.
+   * UPLOAD needs none of that and is what a short workshop should use. Omitted
+   * leaves whatever the program already had, so saving a template name does not
+   * quietly change the mode.
+   */
+  @IsOptional()
+  @IsIn(['GIT', 'UPLOAD'], {
+    message: 'Work is handed in either as GIT or as UPLOAD',
+  })
+  submissionMode?: 'GIT' | 'UPLOAD';
+
   /**
    * A template repository in the same organisation, by name only — the owner is
    * always the connected organisation, so a program cannot be pointed at a
