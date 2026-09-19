@@ -14,6 +14,7 @@ import type { JwtPayload } from '../auth/jwt-payload';
 import { CoursesService } from '../courses/courses.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CodingLiveService } from './coding-live.service';
+import { forStudent } from './ai-visibility';
 import { CreateCodingAssignmentDto } from './dto/create-coding-assignment.dto';
 import { UpdateCodingAssignmentDto } from './dto/update-coding-assignment.dto';
 
@@ -202,7 +203,16 @@ export class CodingService {
         },
       },
     });
-    return { ...assignment, mySubmissions };
+    // The instructor sees the machine's opinion first. Until they release it,
+    // the student gets their own attempts and any feedback written for them,
+    // but not the AI's summary, findings, requirement verdicts, or the
+    // provisional score — which is that same verdict as a number.
+    return {
+      ...assignment,
+      mySubmissions: mySubmissions.map((s) =>
+        forStudent(s, assignment.showAiToStudents, true),
+      ),
+    };
   }
 
   /** The signed-in student's coding assignments across enrolled courses, with
@@ -230,6 +240,8 @@ export class CodingService {
             attemptNumber: true,
             status: true,
             finalScore: true,
+            // Redacted below when the assignment has not released AI output:
+            // this is the AI's verdict expressed as a number.
             provisionalScore: true,
           },
         },
@@ -252,7 +264,13 @@ export class CodingService {
       requirementCount: a._count.requirements,
       maxAttempts: a.maxAttempts,
       allowResubmit: a.allowResubmit,
-      latestSubmission: a.submissions[0] ?? null,
+      // This list is the student's own, so the assignment's release setting
+      // applies: without it the sidebar would show the AI's score as a number
+      // while its reasoning was withheld. The manager's list (teaching, below)
+      // is deliberately not redacted — seeing it first is the point.
+      latestSubmission: a.submissions[0]
+        ? forStudent(a.submissions[0], a.showAiToStudents, true)
+        : null,
     }));
   }
 

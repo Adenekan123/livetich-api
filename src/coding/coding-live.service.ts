@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { RoomBroadcaster } from '../realtime/room-broadcaster';
 import type { CodingPointEntry } from '../shared';
+import { boardScore } from './ai-visibility';
 
 /**
  * Coding Instructor Plugin — the live-session bridge. Pushes coding-task state
@@ -50,7 +51,12 @@ export class CodingLiveService {
   async broadcastPoints(assignmentId: string): Promise<void> {
     const a = await this.prisma.codingAssignment.findUnique({
       where: { id: assignmentId },
-      select: { id: true, sessionId: true, courseId: true },
+      select: {
+        id: true,
+        sessionId: true,
+        courseId: true,
+        showAiToStudents: true,
+      },
     });
     if (!a?.sessionId) return;
 
@@ -74,7 +80,8 @@ export class CodingLiveService {
 
     // Reduce to each student's latest attempt (submissions are attempt-desc).
     const latest = new Map<string, (typeof subs)[number]>();
-    for (const s of subs) if (!latest.has(s.studentId)) latest.set(s.studentId, s);
+    for (const s of subs)
+      if (!latest.has(s.studentId)) latest.set(s.studentId, s);
 
     const entries: CodingPointEntry[] = enrollments
       .map((e) => {
@@ -83,7 +90,13 @@ export class CodingLiveService {
           studentId: e.student.id,
           name: e.student.name,
           status: s?.status ?? 'CODING',
-          score: s ? (s.finalScore ?? s.provisionalScore) : null,
+          // This board is shown to the whole room. A provisional score is the
+          // AI's opinion, so broadcasting it to the class while it is withheld
+          // from the student it describes would be the same leak, louder —
+          // with the flag off, only a score the instructor decided appears.
+          score: s
+            ? boardScore(s.finalScore, s.provisionalScore, a.showAiToStudents)
+            : null,
         };
       })
       // Highest score first; students still coding (null) sort to the bottom.

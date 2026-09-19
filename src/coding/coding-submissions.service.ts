@@ -22,6 +22,7 @@ import { GitHubApiService } from '../github/github-api.service';
 import { AuditAction, AuditService } from '../observability/audit.service';
 import { CodingLiveService } from './coding-live.service';
 import { SubmitCommitDto } from './dto/submit-commit.dto';
+import { forStudent } from './ai-visibility';
 import {
   indexArchive,
   MAX_ARCHIVE_BYTES,
@@ -273,7 +274,7 @@ export class CodingSubmissionsService {
    *  student-visible feedback; managers see everything. */
   async getSubmission(user: JwtPayload, submissionId: string) {
     const { isOwner } = await this.assertAccess(user, submissionId);
-    return this.prisma.codingSubmission.findUnique({
+    const submission = await this.prisma.codingSubmission.findUnique({
       where: { id: submissionId },
       include: {
         files: { orderBy: { path: 'asc' } },
@@ -294,6 +295,16 @@ export class CodingSubmissionsService {
         },
       },
     });
+    if (!submission) return null;
+
+    // The one place both audiences read the same row: a manager sees the AI's
+    // opinion whatever the setting — seeing it first is the point of the flag —
+    // while the student it describes sees it only once released.
+    return forStudent(
+      submission,
+      submission.assignment.showAiToStudents,
+      isOwner,
+    );
   }
 
   /** Stream the stored archive for download (owner or manager). */
