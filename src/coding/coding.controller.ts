@@ -140,19 +140,20 @@ export class CodingController {
    */
   @Post('assignments/:id/submit-commit')
   @Roles(Role.STUDENT)
-  submitCommit(
+  async submitCommit(
     @CurrentUser() user: JwtPayload,
     @Param('id') id: string,
     @Body() dto: SubmitCommitDto,
   ) {
-    // Deliberately does NOT start an AI review yet, unlike the archive path.
-    // The reviewer reads a submission's source from object storage by archive
-    // key, and a commit-backed attempt has no archive — so it would review zero
-    // files and still return a confident score and per-requirement verdicts.
-    // A review of nothing that reads like a review of the work is exactly what
-    // §25 forbids. Reading the commit (and its diff against the previous
-    // attempt, §26) is Phase 6; until then these wait for the instructor.
-    return this.submissions.submitCommit(user, id, dto);
+    const result = await this.submissions.submitCommit(user, id, dto);
+    // Reviews like the archive path now that the reviewer reads the commit
+    // itself — the whole tree on a first attempt, the diff against the previous
+    // one after that (§26). This was held back only while the reviewer would
+    // have seen zero files and still returned a confident score: a review of
+    // nothing that reads like a review of the work (§25). That is no longer
+    // true, so the assignment's own aiAutoReview flag decides again.
+    void this.aiReview.maybeAutoReview(result.submission.id);
+    return result;
   }
 
   /** Manager re-runs the AI review for a submission. */
