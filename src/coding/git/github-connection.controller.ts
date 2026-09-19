@@ -64,6 +64,17 @@ export class GitHubConnectionController {
     return this.connections.disconnect(user, orgOf(user));
   }
 
+  /**
+   * The coding programs the caller can configure, with their starting code.
+   *
+   * Listed before the `:courseId` routes below so "programs" is never read as
+   * a course id.
+   */
+  @Get('programs')
+  programs(@CurrentUser() user: JwtPayload) {
+    return this.connections.listPrograms(user);
+  }
+
   /** How this program provisions repositories, or null if it does not. */
   @Get('programs/:courseId/config')
   programConfig(

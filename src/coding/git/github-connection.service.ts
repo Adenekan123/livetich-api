@@ -4,7 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { GitHubConnectionStatus } from '@prisma/client';
+import { GitHubConnectionStatus, Prisma, Role } from '@prisma/client';
 import type { JwtPayload } from '../../auth/jwt-payload';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CoursesService } from '../../courses/courses.service';
@@ -264,5 +264,78 @@ export class GitHubConnectionService {
     return this.prisma.codingProgramGitConfig.findUnique({
       where: { courseId },
     });
+  }
+
+  /**
+   * The coding programs this person can configure, with their starting code.
+   *
+   * Needed because nothing else could reach a program. Tasks hang off batches,
+   * so the teaching list and the authoring list both return batch ids, while
+   * the git config is keyed on the program above them. Without this, setting
+   * starting code meant knowing a course id and calling the API by hand.
+   *
+   * The visibility rule is the one `authoringContext` already uses — an org
+   * admin sees their organisation, anyone else sees the courses assigned to
+   * them — narrowed to parentless courses, which is what a program is.
+   */
+  async listPrograms(user: JwtPayload) {
+    const scope: Prisma.CourseWhereInput =
+      user.role === Role.ORG_ADMIN
+        ? user.organizationId
+          ? { organizationId: user.organizationId }
+          : { id: '__none__' }
+        : { instructorId: user.sub };
+
+    const programs = await this.prisma.course.findMany({
+      where: { ...scope, parentCourseId: null },
+      select: {
+        id: true,
+        title: true,
+        code: true,
+        organizationId: true,
+        gitConfig: {
+          select: { templateRepositoryName: true, defaultBranch: true },
+        },
+      },
+      orderBy: { title: 'asc' },
+    });
+    if (programs.length === 0) return [];
+
+    // One lookup rather than one per program: they are all in the same
+    // organisation in every case that matters, and a lapsed connection is the
+    // difference between "not set up" and "set up but needs reconnecting".
+    // A course's organisation is nullable in the schema, so the nulls are
+    // dropped before the query rather than sent to it. A program without an
+    // organisation has no connection by definition, and falls out as
+    // `connected: false` below.
+    const orgIds = [
+      ...new Set(
+        programs
+          .map((p) => p.organizationId)
+          .filter((id): id is string => id !== null),
+      ),
+    ];
+    const connections = orgIds.length
+      ? await this.prisma.gitHubOrganizationConnection.findMany({
+          where: { organizationId: { in: orgIds } },
+          select: { organizationId: true, status: true },
+        })
+      : [];
+    const live = new Map(
+      connections.map((c) => [
+        c.organizationId,
+        c.status === GitHubConnectionStatus.ACTIVE,
+      ]),
+    );
+
+    return programs.map((p) => ({
+      courseId: p.id,
+      title: p.title,
+      code: p.code,
+      templateRepositoryName: p.gitConfig?.templateRepositoryName ?? null,
+      defaultBranch: p.gitConfig?.defaultBranch ?? 'main',
+      configured: Boolean(p.gitConfig),
+      connected: p.organizationId ? (live.get(p.organizationId) ?? false) : false,
+    }));
   }
 }
