@@ -56,6 +56,13 @@ export interface CommitComparison {
   truncated: boolean;
 }
 
+/** One file in the repository at a commit. */
+export interface TreeEntry {
+  path: string;
+  /** Bytes, so oversized files can be skipped before being fetched. */
+  size: number;
+}
+
 interface GitHubRepoPayload {
   id: number;
   name: string;
@@ -258,6 +265,71 @@ export class GitHubApiService {
       // GitHub caps the compare endpoint at 300 files.
       truncated: files.length >= 300,
     };
+  }
+
+  /**
+   * Every file in the repository at one commit, as paths and sizes.
+   *
+   * Used for a first submission, which has no earlier attempt to diff against.
+   * Sizes come back with the listing, so oversized and binary files can be
+   * skipped before any of them is fetched.
+   */
+  async listTree(
+    installationId: string,
+    ref: RepoRef,
+    sha: string,
+  ): Promise<{ files: TreeEntry[]; truncated: boolean } | null> {
+    const res = await this.request(
+      installationId,
+      `/repos/${ref.owner}/${ref.repo}/git/trees/${encodeURIComponent(sha)}?recursive=1`,
+    );
+    if (res.status === 404 || res.status === 422) return null;
+    const body = await this.json<{
+      truncated?: boolean;
+      tree?: { path: string; type: string; size?: number }[];
+    }>(res, 'read the repository');
+    return {
+      files: (body.tree ?? [])
+        .filter((t) => t.type === 'blob')
+        .map((t) => ({ path: t.path, size: t.size ?? 0 })),
+      // Very large repositories come back partial rather than failing.
+      truncated: Boolean(body.truncated),
+    };
+  }
+
+  /**
+   * One file's text at a commit.
+   *
+   * Returns null for anything that is not readable text — binaries, and files
+   * GitHub declines to inline — so a caller can skip them without special
+   * casing. The contents endpoint base64-encodes, which also means a file that
+   * decodes with replacement characters was never source code.
+   */
+  async readFile(
+    installationId: string,
+    ref: RepoRef,
+    sha: string,
+    path: string,
+  ): Promise<string | null> {
+    const res = await this.request(
+      installationId,
+      `/repos/${ref.owner}/${ref.repo}/contents/${path
+        .split('/')
+        .map(encodeURIComponent)
+        .join('/')}?ref=${encodeURIComponent(sha)}`,
+    );
+    if (res.status === 404 || res.status === 403) return null;
+    const body = await this.json<{
+      encoding?: string;
+      content?: string;
+      type?: string;
+    }>(res, 'read a file');
+    if (body.type !== 'file' || body.encoding !== 'base64' || !body.content) {
+      return null;
+    }
+    const text = Buffer.from(body.content, 'base64').toString('utf8');
+    // A NUL byte means this was never text, whatever its extension claimed.
+    return text.includes(' ') ? null : text;
   }
 
   // ---- Plumbing -----------------------------------------------------------
