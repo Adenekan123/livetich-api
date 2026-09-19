@@ -1084,7 +1084,8 @@ model AlocQuestionCache {
 /// ============================================================
 /// Coding Instructor Plugin
 /// Rich coding assignments (requirements + weighted rubric), multi-attempt
-/// ZIP submissions, and AI (Claude) code review the instructor always overrides.
+/// submissions — an uploaded ZIP, or a commit in the student's own GitHub
+/// repository — and AI code review (Gemini) the instructor always overrides.
 /// Kept separate from the simpler `Assignment`/`Submission` coursework models.
 /// Excluded by product decision: automated test execution, sandboxing, AI tutor.
 /// ============================================================

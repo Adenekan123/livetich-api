@@ -133,10 +133,17 @@ const GEMINI_SCHEMA = {
 };
 
 /**
- * Coding Instructor Plugin — the AI code reviewer (Claude). It is an assistant,
- * never the final authority: it reads the student's code against the assignment
- * requirements + rubric and returns a structured, instructor-overridable verdict.
- * It never executes code and never claims a test ran (there is no test runner).
+ * Coding Instructor Plugin — the AI code reviewer. It is an assistant, never
+ * the final authority: it reads the student's code against the assignment
+ * requirements + rubric and returns a structured, instructor-overridable
+ * verdict. It never executes code and never claims a test ran (there is no
+ * test runner).
+ *
+ * The provider is Google Gemini (see MODEL above), not Anthropic. Saying
+ * otherwise in a comment is not harmless: CODING_AI_MODEL was once set to an
+ * Anthropic model id, which this client sends to Google and Google rejects —
+ * and because a failed review degrades gracefully, it looked like the pipeline
+ * working while reviewing nothing.
  */
 @Injectable()
 export class CodingAiReviewService {
@@ -187,7 +194,7 @@ export class CodingAiReviewService {
     });
   }
 
-  /** Run one review end to end: build context → call Claude → persist. */
+  /** Run one review end to end: build context → call the model → persist. */
   async review(submissionId: string): Promise<void> {
     const submission = await this.prisma.codingSubmission.findUnique({
       where: { id: submissionId },
