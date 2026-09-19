@@ -3,7 +3,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { GitHubApiService } from '../../github/github-api.service';
 import type { TreeEntry } from '../../github/github-api.service';
 import { resolveCommitRef, type CommitRef } from './commit-ref';
-import { SKIP_DIRECTORIES } from './review-source';
+import { SKIP_DIRECTORIES, studentOwnFiles } from './review-source';
 
 /**
  * What an instructor is shown for a commit-backed submission (§27).
@@ -228,23 +228,16 @@ export class CommitViewService {
     ]);
     if (!student || !template) return null;
 
-    const starting = new Map<string, string>();
-    for (const f of template.files) starting.set(f.path, f.sha);
-
-    const mine: CommitViewFile[] = [];
-    let unchanged = 0;
-    for (const f of student.files) {
-      if (!isStudentPath(f.path)) continue;
-      const was = starting.get(f.path);
-      if (was === undefined) {
-        mine.push(entry(f, 'added'));
-      } else if (was !== f.sha) {
-        mine.push(entry(f, 'modified'));
-      } else {
-        unchanged++;
-      }
-    }
-    mine.sort((a, b) => a.path.localeCompare(b.path));
+    // Shared with the AI reviewer on purpose: the instructor's file list and
+    // the model's source must agree on whose work is whose.
+    const { own, unchangedCount: unchanged } = studentOwnFiles(
+      student.files,
+      template.files,
+      (f) => isStudentPath(f.path),
+    );
+    const mine = own
+      .map((f) => entry(f, f.status))
+      .sort((a, b) => a.path.localeCompare(b.path));
 
     return {
       ...base,

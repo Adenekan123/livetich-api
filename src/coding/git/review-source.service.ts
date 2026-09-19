@@ -1,12 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { GitHubApiService } from '../../github/github-api.service';
-import { resolveCommitRef } from './commit-ref';
+import { resolveCommitRef, type CommitRef } from './commit-ref';
 import { AI_TEXT_BUDGET_BYTES } from '../coding-submissions.service';
 import {
   isReviewable,
   renderSource,
   reviewOrder,
+  studentOwnFiles,
   type ReviewSource,
   type SourceFile,
 } from './review-source';
@@ -61,6 +62,21 @@ export class ReviewSourceService {
       this.log.warn(
         `Could not diff ${resolved.previousSha.slice(0, 8)}..${resolved.sha.slice(0, 8)}; reading the full tree instead`,
       );
+    } else if (resolved.templateRepo) {
+      // A first attempt on a program with starting code. Reading the whole
+      // repository here is how the reviewer went blind on a large project: a
+      // Next.js tree overruns the budget long before the student's own files
+      // are reached, so it marked work it had mostly not been shown.
+      const own = await this.readAgainstTemplate(
+        resolved,
+        ref,
+        installationId,
+        budgetBytes,
+      );
+      if (own) return own;
+      this.log.warn(
+        `Could not read template ${resolved.orgLogin}/${resolved.templateRepo}; reading the full tree instead`,
+      );
     }
 
     return this.readFull(installationId, ref, resolved.sha, budgetBytes);
@@ -72,7 +88,53 @@ export class ReviewSourceService {
     return source ? renderSource(source) : null;
   }
 
-  // ---- The two shapes ----------------------------------------------------
+  // ---- The three shapes --------------------------------------------------
+
+  /**
+   * A first attempt, reduced to what the student added to the starting code.
+   *
+   * Returns null when either tree cannot be read, so the caller falls back to
+   * the whole repository rather than reviewing an empty set. An empty result
+   * from a *successful* comparison is not null — a student who changed nothing
+   * is a real answer, and the prompt says so.
+   */
+  private async readAgainstTemplate(
+    ref: CommitRef,
+    repoRef: { owner: string; repo: string },
+    installationId: string,
+    budgetBytes: number,
+  ): Promise<ReviewSource | null> {
+    if (!ref.templateRepo) return null;
+
+    const [student, template] = await Promise.all([
+      this.github.listTree(installationId, repoRef, ref.sha),
+      this.github.listTree(
+        installationId,
+        { owner: ref.orgLogin, repo: ref.templateRepo },
+        ref.templateBranch,
+      ),
+    ]);
+    if (!student || !template) return null;
+
+    const { own } = studentOwnFiles(student.files, template.files, (f) =>
+      isReviewable(f.path, f.size),
+    );
+
+    const { files, truncated } = await this.fetchWithin(
+      installationId,
+      repoRef,
+      ref.sha,
+      own.slice().sort(reviewOrder).map((f) => f.path),
+      budgetBytes,
+    );
+
+    return {
+      kind: 'template',
+      files,
+      patches: [],
+      truncated: truncated || student.truncated || template.truncated,
+    };
+  }
 
   private async readFull(
     installationId: string,

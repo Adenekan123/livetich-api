@@ -80,8 +80,14 @@ export interface SourceFile {
 }
 
 export interface ReviewSource {
-  /** How this was assembled, so the prompt can be honest about it. */
-  kind: 'full' | 'diff';
+  /**
+   * How this was assembled, so the prompt can be honest about it.
+   *
+   * `template` is a first attempt on a program that ships starting code: only
+   * the files the student added or changed. Like `diff`, it is a subset, and
+   * the prompt must say so.
+   */
+  kind: 'full' | 'diff' | 'template';
   files: SourceFile[];
   /** Unified diffs, when reviewing a resubmission. */
   patches: { path: string; status: string; patch: string }[];
@@ -126,15 +132,55 @@ export function reviewOrder(a: { path: string }, b: { path: string }): number {
   return a.path.localeCompare(b.path);
 }
 
+/** One entry in a repository tree, as both services receive it. */
+export interface TreeFile {
+  path: string;
+  /** The blob's content hash — identical content has an identical sha. */
+  sha: string;
+  size: number;
+}
+
+export type OwnedFile = TreeFile & { status: 'added' | 'modified' };
+
+/**
+ * Which files in a student's repository are the student's own work.
+ *
+ * A repository created from a GitHub template shares no history with that
+ * template, so there is no merge base and no commit to compare against. But
+ * two identical files have the same blob sha in both trees, so a file the
+ * template does not have is new, and one whose sha differs was edited.
+ * Everything else is the starting code every student was handed.
+ *
+ * Pure, and shared: the instructor's file browser and the AI reviewer must
+ * agree on whose work is whose, and two copies of this rule would eventually
+ * disagree. `keep` decides what is even a candidate — the two callers exclude
+ * different things, because a human may want to open a file a model cannot use.
+ */
+export function studentOwnFiles(
+  student: TreeFile[],
+  template: TreeFile[],
+  keep: (file: TreeFile) => boolean,
+): { own: OwnedFile[]; unchangedCount: number } {
+  const starting = new Map<string, string>();
+  for (const f of template) starting.set(f.path, f.sha);
+
+  const own: OwnedFile[] = [];
+  let unchangedCount = 0;
+  for (const f of student) {
+    if (!keep(f)) continue;
+    const was = starting.get(f.path);
+    if (was === undefined) own.push({ ...f, status: 'added' });
+    else if (was !== f.sha) own.push({ ...f, status: 'modified' });
+    else unchangedCount++;
+  }
+  return { own, unchangedCount };
+}
+
 /**
  * Render the source into the block the prompt carries, stating plainly which
- * of the two shapes it is.
+ * of the three shapes it is.
  */
 export function renderSource(source: ReviewSource): string {
-  if (source.files.length === 0 && source.patches.length === 0) {
-    return '(no readable source files were found in this submission)';
-  }
-
   const header =
     source.kind === 'diff'
       ? [
@@ -144,10 +190,29 @@ export function renderSource(source: ReviewSource): string {
           'Work not shown here was submitted before and has not been altered —',
           'do NOT mark a requirement failed merely because its code is absent.',
         ].join('\n')
-      : [
-          'This is the first attempt. You are being shown the repository as it',
-          'stands at the submitted commit.',
-        ].join('\n');
+      : source.kind === 'template'
+        ? [
+            'This is the FIRST ATTEMPT on a program that ships starting code.',
+            'You are being shown only the files this student added or changed.',
+            'Every other file is the starting code that every student was given',
+            'and is not shown here.',
+            'Do NOT mark a requirement failed merely because its code is absent —',
+            'it may live in the unchanged starting code.',
+          ].join('\n')
+        : [
+            'This is the first attempt. You are being shown the repository as it',
+            'stands at the submitted commit.',
+          ].join('\n');
+
+  if (source.files.length === 0 && source.patches.length === 0) {
+    // For a template submission this is a finding, not a failure to read
+    // anything: the student handed back the starting code untouched. Saying so
+    // plainly is very different from "no files were found", which reads like
+    // the pipeline broke and invites the model to hedge.
+    return source.kind === 'template'
+      ? `${header}\n\nThis student changed nothing at all from the starting code.`
+      : '(no readable source files were found in this submission)';
+  }
 
   const patches = source.patches.length
     ? '\n\nChanges since the last attempt:\n' +
