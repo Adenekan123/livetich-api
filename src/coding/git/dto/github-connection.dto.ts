@@ -22,6 +22,16 @@ export class ConnectGitHubDto {
  * Both fields are optional: a program with no template gets an empty private
  * repository with a first commit, which is a perfectly good starting point.
  */
+/** Create the starter repository for a program, by name. */
+export class CreateStarterDto {
+  @IsString()
+  @MaxLength(100)
+  @Matches(/^[A-Za-z0-9._-]+$/, {
+    message: 'Use just the repository name, not its full URL',
+  })
+  name!: string;
+}
+
 export class ConfigureProgramGitDto {
   /**
    * A template repository in the same organisation, by name only — the owner is

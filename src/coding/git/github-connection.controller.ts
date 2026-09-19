@@ -7,6 +7,7 @@ import {
   Param,
   Post,
   Put,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { Role } from '@prisma/client';
@@ -21,6 +22,7 @@ import {
 import {
   ConfigureProgramGitDto,
   ConnectGitHubDto,
+  CreateStarterDto,
 } from './dto/github-connection.dto';
 import { GitHubConnectionService } from './github-connection.service';
 
@@ -81,6 +83,26 @@ export class GitHubConnectionController {
   @Get('programs')
   programs(@CurrentUser() user: JwtPayload) {
     return this.connections.listPrograms(user);
+  }
+
+  /** Whether a starter repository is usable, and which step failed if not. */
+  @Get('programs/:courseId/template-check')
+  checkTemplate(
+    @CurrentUser() user: JwtPayload,
+    @Param('courseId') courseId: string,
+    @Query('name') name: string,
+  ) {
+    return this.connections.checkTemplate(user, courseId, name);
+  }
+
+  /** Create the starter repository and point the program at it. */
+  @Post('programs/:courseId/template')
+  createStarter(
+    @CurrentUser() user: JwtPayload,
+    @Param('courseId') courseId: string,
+    @Body() dto: CreateStarterDto,
+  ) {
+    return this.connections.createStarter(user, courseId, dto.name);
   }
 
   /** How this program provisions repositories, or null if it does not. */

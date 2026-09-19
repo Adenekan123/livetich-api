@@ -259,6 +259,145 @@ export class GitHubConnectionService {
   }
 
   /** The program's coding configuration, or null when it has none. */
+  /**
+   * Is this starter repository actually usable, and if not, which step failed?
+   *
+   * Setting starting code means getting three separate things right on
+   * github.com — the repository exists, it is marked as a template, and the
+   * Livetich app can see it. Miss the third and the error is "no repository
+   * called fe-starter", which reads like a typo and is not one. This reports
+   * each step rather than making somebody guess which of the three they missed.
+   *
+   * One limit is honest rather than engineered around: GitHub answers 404 both
+   * for a repository that does not exist and for one the app cannot see. From
+   * outside they are indistinguishable, so the message names both causes.
+   */
+  async checkTemplate(user: JwtPayload, courseId: string, name: string) {
+    await this.courses.assertCanManageCourse(user, courseId);
+    const connection = await this.activeConnection(courseId);
+    if (!connection) {
+      return {
+        ok: false,
+        found: false,
+        isTemplate: false,
+        htmlUrl: null,
+        message:
+          'This workspace has no live GitHub connection, so nothing can be checked yet.',
+      };
+    }
+
+    const repo = await this.github.getRepo(connection.githubInstallationId, {
+      owner: connection.githubOrganizationLogin,
+      repo: name,
+    });
+
+    if (!repo) {
+      return {
+        ok: false,
+        found: false,
+        isTemplate: false,
+        htmlUrl: null,
+        message:
+          `No repository called "${name}" is visible in ${connection.githubOrganizationLogin}. ` +
+          'Either it does not exist, or the Livetich app has not been given access to it — ' +
+          'if the app was installed on selected repositories only, a new one is not included automatically.',
+      };
+    }
+
+    if (!repo.isTemplate) {
+      return {
+        ok: false,
+        found: true,
+        isTemplate: false,
+        htmlUrl: repo.htmlUrl,
+        message:
+          `"${name}" exists, but is not marked as a template repository, so student ` +
+          'repositories cannot be created from it. Turn on "Template repository" in its GitHub settings.',
+      };
+    }
+
+    return {
+      ok: true,
+      found: true,
+      isTemplate: true,
+      htmlUrl: repo.htmlUrl,
+      message: `"${name}" is ready — students will start from it.`,
+    };
+  }
+
+  /**
+   * Create the starter repository, mark it as a template, and point the program
+   * at it.
+   *
+   * The instructor was previously expected to do three things on github.com and
+   * then type the name back here, with no feedback until a student pressed
+   * Start. Creating it through the app removes all three: it lands in the right
+   * organisation, it is a template, and the app can obviously see it because
+   * the app made it.
+   *
+   * It is created empty. Generating a working project server-side is a much
+   * larger job, and it is not the part that was hard — the instructor was
+   * always going to write their own starting code.
+   */
+  async createStarter(user: JwtPayload, courseId: string, name: string) {
+    await this.courses.assertCanManageCourse(user, courseId);
+    const connection = await this.activeConnection(courseId);
+    if (!connection) {
+      throw new BadRequestException(
+        'Connect this workspace to GitHub before creating a starter repository.',
+      );
+    }
+
+    const owner = connection.githubOrganizationLogin;
+    const installationId = connection.githubInstallationId;
+
+    // Idempotent on purpose: a second press must not fail, and must never make
+    // a second repository beside the first.
+    const existing = await this.github.getRepo(installationId, {
+      owner,
+      repo: name,
+    });
+    const repo =
+      existing ??
+      (await this.github.createRepo(installationId, {
+        org: owner,
+        name,
+        description: 'Starting code for Livetich students',
+      }));
+
+    if (!repo.isTemplate) {
+      await this.github.markTemplate(installationId, { owner, repo: name });
+    }
+
+    await this.configureProgram(user, connection.organizationId, courseId, {
+      templateRepositoryName: name,
+    });
+
+    return {
+      created: !existing,
+      fullName: repo.fullName,
+      htmlUrl: repo.htmlUrl,
+      defaultBranch: repo.defaultBranch,
+    };
+  }
+
+  /** The workspace's live connection for a program, or null. */
+  private async activeConnection(courseId: string) {
+    const course = await this.prisma.course.findUnique({
+      where: { id: courseId },
+      select: { organizationId: true },
+    });
+    if (!course?.organizationId) return null;
+    const connection =
+      await this.prisma.gitHubOrganizationConnection.findUnique({
+        where: { organizationId: course.organizationId },
+      });
+    if (!connection || connection.status !== GitHubConnectionStatus.ACTIVE) {
+      return null;
+    }
+    return connection;
+  }
+
   async programConfig(user: JwtPayload, courseId: string) {
     await this.courses.assertCanManageCourse(user, courseId);
     return this.prisma.codingProgramGitConfig.findUnique({

@@ -30,6 +30,14 @@ export interface Repository {
   defaultBranch: string;
   archived: boolean;
   htmlUrl: string;
+  /**
+   * Whether GitHub will let student repositories be generated from this one.
+   *
+   * Read because a starter repository that exists but is not marked as a
+   * template fails at the worst possible moment — when a student presses Start
+   * — with an error about the template, not about the setting they forgot.
+   */
+  isTemplate: boolean;
 }
 
 export interface CommitInfo {
@@ -81,6 +89,7 @@ interface GitHubRepoPayload {
   default_branch: string;
   archived: boolean;
   html_url: string;
+  is_template?: boolean;
 }
 
 @Injectable()
@@ -193,6 +202,24 @@ export class GitHubApiService {
     if (res.status !== 201 && res.status !== 204) {
       await this.fail(res, 'grant repository access');
     }
+  }
+
+  /**
+   * Mark a repository as a template, so student repositories can be generated
+   * from it.
+   *
+   * Its own call rather than a flag on creation: GitHub will not accept
+   * `is_template` when creating an organisation repository, and a starter that
+   * exists but is not a template is the single most confusing way for this to
+   * be half-configured.
+   */
+  async markTemplate(installationId: string, ref: RepoRef): Promise<void> {
+    const res = await this.request(
+      installationId,
+      `/repos/${ref.owner}/${ref.repo}`,
+      { method: 'PATCH', body: { is_template: true } },
+    );
+    if (!res.ok) await this.fail(res, 'mark the repository as a template');
   }
 
   /** Archive rather than delete: a finished program's code is evidence (§34). */
@@ -399,5 +426,6 @@ function toRepository(payload: GitHubRepoPayload): Repository {
     defaultBranch: payload.default_branch,
     archived: payload.archived,
     htmlUrl: payload.html_url,
+    isTemplate: Boolean(payload.is_template),
   };
 }
