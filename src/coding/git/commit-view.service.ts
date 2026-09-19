@@ -1,7 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { GitHubApiService } from '../../github/github-api.service';
-import { resolveCommitRef } from './commit-ref';
+import type { TreeEntry } from '../../github/github-api.service';
+import { resolveCommitRef, type CommitRef } from './commit-ref';
 import { SKIP_DIRECTORIES } from './review-source';
 
 /**
@@ -12,6 +13,14 @@ import { SKIP_DIRECTORIES } from './review-source';
  * lockfiles, images, oversized files. A human reviewing a student is asking a
  * different question and may well want to click the file the model skipped, so
  * this lists the repository as it is and leaves the reading to them.
+ *
+ * Three shapes, in order of how much they spare the reader:
+ *
+ *  - `diff`     — a resubmission, compared against the previous attempt.
+ *  - `template` — a first attempt on a program that ships starting code. Shows
+ *                 only what the student added to it, which is the difference
+ *                 between reviewing six files and reviewing three hundred.
+ *  - `full`     — everything else: the repository as it stands at the commit.
  *
  * Every method returns null when the submission is not commit-backed, so the
  * caller can fall back to the uploaded archive instead of showing an empty
@@ -39,10 +48,10 @@ export interface CommitViewFile {
 
 export interface CommitView {
   /**
-   * Which of the two listings this is. The instructor's panel must not show
-   * "+0 −0" against every file of a first attempt as though nothing changed.
+   * Which of the three listings this is. The instructor's panel must not show
+   * "+0 -0" against every file of a first attempt as though nothing changed.
    */
-  kind: 'full' | 'diff';
+  kind: 'full' | 'diff' | 'template';
   commitSha: string;
   shortSha: string;
   message: string;
@@ -52,6 +61,10 @@ export interface CommitView {
   repositoryFullName: string;
   compareUrl: string | null;
   baseSha: string | null;
+  /** What this listing is measured against, in words for a human. */
+  baseLabel: string | null;
+  /** Files left exactly as the starting code. Only meaningful for `template`. */
+  unchangedCount: number;
   files: CommitViewFile[];
   truncated: boolean;
 }
@@ -61,6 +74,11 @@ export interface CommitTextFile {
   path: string;
   content: string;
   language: string | null;
+}
+
+/** Dependencies and build output are nobody's coursework. */
+function isStudentPath(path: string): boolean {
+  return !path.split('/').some((s) => SKIP_DIRECTORIES.has(s));
 }
 
 @Injectable()
@@ -96,78 +114,189 @@ export class CommitViewService {
     };
 
     if (ref.previousSha) {
-      const comparison = await this.github.compareCommits(
-        ref.installationId,
-        repoRef,
-        ref.previousSha,
-        ref.sha,
-      );
+      const diff = await this.readDiff(ref, repoRef, base);
+      if (diff) return diff;
       // A compare fails when the earlier commit is gone — rewritten history, or
-      // a repository recreated. Listing the whole tree is then correct; an
-      // empty diff would read as "this student changed nothing".
-      if (comparison) {
-        let spent = 0;
-        const files: CommitViewFile[] = comparison.files
-          .slice(0, MAX_LISTED_FILES)
-          .map((f) => {
-            let patch: string | null = null;
-            if (f.patch && spent < MAX_TOTAL_PATCH_BYTES) {
-              patch =
-                f.patch.length > MAX_PATCH_BYTES
-                  ? `${f.patch.slice(0, MAX_PATCH_BYTES)}\n… diff truncated`
-                  : f.patch;
-              spent += patch.length;
-            }
-            return {
-              path: f.path,
-              status: f.status,
-              additions: f.additions,
-              deletions: f.deletions,
-              size: null,
-              patch,
-            };
-          });
-        return {
-          ...base,
-          kind: 'diff',
-          baseSha: ref.previousSha,
-          compareUrl: `https://github.com/${ref.fullName}/compare/${ref.previousSha}...${ref.sha}`,
-          files,
-          truncated:
-            comparison.truncated ||
-            comparison.files.length > MAX_LISTED_FILES,
-        };
-      }
+      // a repository recreated. Falling through is correct; an empty diff would
+      // read as "this student changed nothing".
       this.log.warn(
         `Could not compare ${ref.previousSha.slice(0, 8)}..${ref.sha.slice(0, 8)}; listing the tree instead`,
       );
+    } else if (ref.templateRepo) {
+      const against = await this.readAgainstTemplate(ref, repoRef, base);
+      if (against) return against;
+      this.log.warn(
+        `Could not read template ${ref.orgLogin}/${ref.templateRepo}; listing the tree instead`,
+      );
     }
 
+    return this.readTree(ref, repoRef, base);
+  }
+
+  // ---- The three shapes ---------------------------------------------------
+
+  private async readDiff(
+    ref: CommitRef,
+    repoRef: { owner: string; repo: string },
+    base: Omit<
+      CommitView,
+      | 'kind'
+      | 'compareUrl'
+      | 'baseSha'
+      | 'baseLabel'
+      | 'unchangedCount'
+      | 'files'
+      | 'truncated'
+    >,
+  ): Promise<CommitView | null> {
+    if (!ref.previousSha) return null;
+    const comparison = await this.github.compareCommits(
+      ref.installationId,
+      repoRef,
+      ref.previousSha,
+      ref.sha,
+    );
+    if (!comparison) return null;
+
+    let spent = 0;
+    const files: CommitViewFile[] = comparison.files
+      .slice(0, MAX_LISTED_FILES)
+      .map((f) => {
+        let patch: string | null = null;
+        if (f.patch && spent < MAX_TOTAL_PATCH_BYTES) {
+          patch =
+            f.patch.length > MAX_PATCH_BYTES
+              ? `${f.patch.slice(0, MAX_PATCH_BYTES)}\n… diff truncated`
+              : f.patch;
+          spent += patch.length;
+        }
+        return {
+          path: f.path,
+          status: f.status,
+          additions: f.additions,
+          deletions: f.deletions,
+          size: null,
+          patch,
+        };
+      });
+
+    return {
+      ...base,
+      kind: 'diff',
+      baseSha: ref.previousSha,
+      baseLabel: `attempt #${ref.attemptNumber - 1}`,
+      unchangedCount: 0,
+      compareUrl: `https://github.com/${ref.fullName}/compare/${ref.previousSha}...${ref.sha}`,
+      files,
+      truncated:
+        comparison.truncated || comparison.files.length > MAX_LISTED_FILES,
+    };
+  }
+
+  /**
+   * A first attempt, measured against the program's starting code.
+   *
+   * Repositories created from a GitHub template share no history with it, so
+   * this cannot be a commit comparison. It compares the two trees by blob hash
+   * instead: a file the template does not have is new, and a file whose hash
+   * differs is one the student edited. Everything else is the starting code and
+   * is counted rather than listed.
+   */
+  private async readAgainstTemplate(
+    ref: CommitRef,
+    repoRef: { owner: string; repo: string },
+    base: Omit<
+      CommitView,
+      | 'kind'
+      | 'compareUrl'
+      | 'baseSha'
+      | 'baseLabel'
+      | 'unchangedCount'
+      | 'files'
+      | 'truncated'
+    >,
+  ): Promise<CommitView | null> {
+    if (!ref.templateRepo) return null;
+
+    const [student, template] = await Promise.all([
+      this.github.listTree(ref.installationId, repoRef, ref.sha),
+      this.github.listTree(
+        ref.installationId,
+        { owner: ref.orgLogin, repo: ref.templateRepo },
+        ref.templateBranch,
+      ),
+    ]);
+    if (!student || !template) return null;
+
+    const starting = new Map<string, string>();
+    for (const f of template.files) starting.set(f.path, f.sha);
+
+    const mine: CommitViewFile[] = [];
+    let unchanged = 0;
+    for (const f of student.files) {
+      if (!isStudentPath(f.path)) continue;
+      const was = starting.get(f.path);
+      if (was === undefined) {
+        mine.push(entry(f, 'added'));
+      } else if (was !== f.sha) {
+        mine.push(entry(f, 'modified'));
+      } else {
+        unchanged++;
+      }
+    }
+    mine.sort((a, b) => a.path.localeCompare(b.path));
+
+    return {
+      ...base,
+      kind: 'template',
+      baseSha: null,
+      baseLabel: 'the starting code',
+      unchangedCount: unchanged,
+      compareUrl: null,
+      files: mine.slice(0, MAX_LISTED_FILES),
+      truncated:
+        student.truncated ||
+        template.truncated ||
+        mine.length > MAX_LISTED_FILES,
+    };
+  }
+
+  private async readTree(
+    ref: CommitRef,
+    repoRef: { owner: string; repo: string },
+    base: Omit<
+      CommitView,
+      | 'kind'
+      | 'compareUrl'
+      | 'baseSha'
+      | 'baseLabel'
+      | 'unchangedCount'
+      | 'files'
+      | 'truncated'
+    >,
+  ): Promise<CommitView> {
     const tree = await this.github.listTree(
       ref.installationId,
       repoRef,
       ref.sha,
     );
     const listed = (tree?.files ?? [])
-      .filter((f) => !f.path.split('/').some((s) => SKIP_DIRECTORIES.has(s)))
+      .filter((f) => isStudentPath(f.path))
       .sort((a, b) => a.path.localeCompare(b.path));
 
     return {
       ...base,
       kind: 'full',
       baseSha: null,
+      baseLabel: null,
+      unchangedCount: 0,
       compareUrl: null,
-      files: listed.slice(0, MAX_LISTED_FILES).map((f) => ({
-        path: f.path,
-        status: 'present',
-        additions: 0,
-        deletions: 0,
-        size: f.size,
-        patch: null,
-      })),
+      files: listed.slice(0, MAX_LISTED_FILES).map((f) => entry(f, 'present')),
       truncated: (tree?.truncated ?? false) || listed.length > MAX_LISTED_FILES,
     };
   }
+
+  // ---- Reading one file ---------------------------------------------------
 
   /** One file's text at the submitted commit. Null if not commit-backed. */
   async fileAt(
@@ -194,6 +323,17 @@ export class CommitViewService {
     });
     return Boolean(sub?.commitSha);
   }
+}
+
+function entry(f: TreeEntry, status: string): CommitViewFile {
+  return {
+    path: f.path,
+    status,
+    additions: 0,
+    deletions: 0,
+    size: f.size,
+    patch: null,
+  };
 }
 
 /** Editor hint only — the panel highlights by it, nothing depends on it. */

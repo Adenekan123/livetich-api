@@ -61,6 +61,16 @@ export interface TreeEntry {
   path: string;
   /** Bytes, so oversized files can be skipped before being fetched. */
   size: number;
+  /**
+   * The blob's content hash.
+   *
+   * This is how a student's work is told apart from the starting code they
+   * began with. A repository made from a GitHub template shares no history
+   * with that template, so the two cannot be compared as commits — but two
+   * identical files have the same blob sha in both, so a file whose sha
+   * differs (or whose path is absent upstream) is the student's own.
+   */
+  sha: string;
 }
 
 interface GitHubRepoPayload {
@@ -286,12 +296,12 @@ export class GitHubApiService {
     if (res.status === 404 || res.status === 422) return null;
     const body = await this.json<{
       truncated?: boolean;
-      tree?: { path: string; type: string; size?: number }[];
+      tree?: { path: string; type: string; size?: number; sha?: string }[];
     }>(res, 'read the repository');
     return {
       files: (body.tree ?? [])
         .filter((t) => t.type === 'blob')
-        .map((t) => ({ path: t.path, size: t.size ?? 0 })),
+        .map((t) => ({ path: t.path, size: t.size ?? 0, sha: t.sha ?? '' })),
       // Very large repositories come back partial rather than failing.
       truncated: Boolean(body.truncated),
     };

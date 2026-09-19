@@ -2,16 +2,17 @@ import { GitHubConnectionStatus } from '@prisma/client';
 import type { PrismaService } from '../../prisma/prisma.service';
 
 /**
- * Where one submission's code actually lives.
+ * Where one submission's code actually lives, and what it started from.
  *
- * A submission pinned to a commit is only readable through three facts that sit
- * in three different rows: the workspace holds the repository, the workspace's
- * course holds the organisation, and the organisation holds the GitHub
- * installation the call must be made as. Resolving that chain was written twice
- * — once for the AI reviewer and once for the instructor's file browser — and
- * two copies of "which repository is this student's work in" is exactly the
- * kind of thing that drifts apart and starts showing one person's code to
- * another. It lives here once.
+ * A submission pinned to a commit is only readable through facts that sit in
+ * several different rows: the workspace holds the repository, the workspace's
+ * course is the *batch* whose parent is the program, the program holds the
+ * starting template, and the organisation holds the GitHub installation the
+ * call must be made as. Resolving that chain was written twice — once for the
+ * AI reviewer and once for the instructor's file browser — and two copies of
+ * "which repository is this student's work in" is exactly the kind of thing
+ * that drifts apart and starts showing one person's code to another. It lives
+ * here once.
  *
  * Returns null whenever the chain does not complete: no commit, no workspace,
  * no repository, or an installation that is no longer active. Callers fall back
@@ -28,6 +29,17 @@ export interface CommitRef {
   /** The previous attempt's commit, when there was one — the diff base. */
   previousSha: string | null;
   attemptNumber: number;
+  /** The organisation login. Templates live in the same organisation. */
+  orgLogin: string;
+  /**
+   * The program's starting code, when it has one.
+   *
+   * On a first attempt this is what makes a large project reviewable: the
+   * instructor is shown what the student added to the starting code, not the
+   * three hundred files everyone was given.
+   */
+  templateRepo: string | null;
+  templateBranch: string;
 }
 
 export async function resolveCommitRef(
@@ -45,7 +57,11 @@ export async function resolveCommitRef(
       workspace: {
         select: {
           githubRepositoryFullName: true,
-          course: { select: { organizationId: true } },
+          // The workspace hangs off the batch; the program above it is what
+          // owns the git configuration, and so the template.
+          course: {
+            select: { organizationId: true, parentCourseId: true },
+          },
         },
       },
     },
@@ -85,6 +101,20 @@ export async function resolveCommitRef(
     select: { commitSha: true },
   });
 
+  const programId = submission.workspace.course.parentCourseId;
+  let templateRepo: string | null = null;
+  let templateBranch = 'main';
+  if (programId) {
+    const config = await prisma.codingProgramGitConfig.findUnique({
+      where: { courseId: programId },
+      select: { templateRepositoryName: true, defaultBranch: true },
+    });
+    if (config?.templateRepositoryName) {
+      templateRepo = config.templateRepositoryName;
+      templateBranch = config.defaultBranch || 'main';
+    }
+  }
+
   return {
     installationId: connection.githubInstallationId,
     owner,
@@ -93,5 +123,8 @@ export async function resolveCommitRef(
     sha: submission.commitSha,
     previousSha: previous?.commitSha ?? null,
     attemptNumber: submission.attemptNumber,
+    orgLogin: connection.githubOrganizationLogin,
+    templateRepo,
+    templateBranch,
   };
 }
