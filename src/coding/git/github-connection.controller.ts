@@ -7,11 +7,17 @@ import {
   Param,
   Post,
   Put,
+  UseGuards,
 } from '@nestjs/common';
 import { Role } from '@prisma/client';
 import { CurrentUser } from '../../auth/current-user.decorator';
 import type { JwtPayload } from '../../auth/jwt-payload';
 import { Roles } from '../../auth/roles.guard';
+import { PLUGIN_CODE_INSTRUCTION } from '../../plugins/catalog';
+import {
+  RequirePlugin,
+  RequirePluginGuard,
+} from '../../plugins/require-plugin.guard';
 import {
   ConfigureProgramGitDto,
   ConnectGitHubDto,
@@ -35,6 +41,8 @@ function orgOf(user: JwtPayload): string {
  * or disconnect their own workspace (§32, §44).
  */
 @Controller('coding/github')
+@UseGuards(RequirePluginGuard)
+@RequirePlugin(PLUGIN_CODE_INSTRUCTION)
 export class GitHubConnectionController {
   constructor(private readonly connections: GitHubConnectionService) {}
 

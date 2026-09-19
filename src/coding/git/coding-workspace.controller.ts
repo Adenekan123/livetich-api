@@ -1,6 +1,11 @@
-import { Controller, Get, Param, Post } from '@nestjs/common';
+import { Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
 import { CurrentUser } from '../../auth/current-user.decorator';
 import type { JwtPayload } from '../../auth/jwt-payload';
+import { PLUGIN_CODE_INSTRUCTION } from '../../plugins/catalog';
+import {
+  RequirePlugin,
+  RequirePluginGuard,
+} from '../../plugins/require-plugin.guard';
 import { CodingWorkspaceService } from './coding-workspace.service';
 import type {
   WorkspaceSummary,
@@ -21,6 +26,8 @@ import type {
  * student -> enrolment -> program -> workspace from the token every time (§44).
  */
 @Controller('coding/workspaces')
+@UseGuards(RequirePluginGuard)
+@RequirePlugin(PLUGIN_CODE_INSTRUCTION)
 export class CodingWorkspaceController {
   constructor(private readonly workspaces: CodingWorkspaceService) {}
 

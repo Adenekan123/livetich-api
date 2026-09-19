@@ -1,6 +1,18 @@
-import { Body, Controller, Delete, Get, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import { CurrentUser } from '../../auth/current-user.decorator';
 import type { JwtPayload } from '../../auth/jwt-payload';
+import { PLUGIN_CODE_INSTRUCTION } from '../../plugins/catalog';
+import {
+  RequirePlugin,
+  RequirePluginGuard,
+} from '../../plugins/require-plugin.guard';
 import { ConnectGitHubIdentityDto } from './dto/github-identity.dto';
 import { GitHubIdentityService } from './github-identity.service';
 import type { GitHubIdentity } from './github-identity.service';
@@ -14,6 +26,8 @@ import type { GitHubIdentity } from './github-identity.service';
  * the same way.
  */
 @Controller('coding/github/identity')
+@UseGuards(RequirePluginGuard)
+@RequirePlugin(PLUGIN_CODE_INSTRUCTION)
 export class GitHubIdentityController {
   constructor(private readonly identity: GitHubIdentityService) {}
 

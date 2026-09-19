@@ -8,6 +8,7 @@ import {
   Query,
   StreamableFile,
   UploadedFile,
+  UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
@@ -15,6 +16,11 @@ import { Role } from '@prisma/client';
 import { CurrentUser } from '../auth/current-user.decorator';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { Roles } from '../auth/roles.guard';
+import { PLUGIN_CODE_INSTRUCTION } from '../plugins/catalog';
+import {
+  RequirePlugin,
+  RequirePluginGuard,
+} from '../plugins/require-plugin.guard';
 import { CodingService } from './coding.service';
 import { CodingSubmissionsService } from './coding-submissions.service';
 import { CodingAiReviewService } from './coding-ai-review.service';
@@ -37,6 +43,8 @@ interface UploadedBlob {
 
 /** Coding Instructor Plugin — assignment authoring, delivery & submissions. */
 @Controller('coding')
+@UseGuards(RequirePluginGuard)
+@RequirePlugin(PLUGIN_CODE_INSTRUCTION)
 export class CodingController {
   constructor(
     private readonly coding: CodingService,
