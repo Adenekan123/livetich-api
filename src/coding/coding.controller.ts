@@ -25,6 +25,7 @@ import { CodingService } from './coding.service';
 import { CodingSubmissionsService } from './coding-submissions.service';
 import { CodingAiReviewService } from './coding-ai-review.service';
 import { CodingInstructorService } from './coding-instructor.service';
+import { ReviewAccessService } from './git/review-access.service';
 import { MAX_ARCHIVE_BYTES } from './coding-archive.util';
 import { CreateCodingAssignmentDto } from './dto/create-coding-assignment.dto';
 import { DecisionDto } from './dto/decision.dto';
@@ -51,6 +52,7 @@ export class CodingController {
     private readonly submissions: CodingSubmissionsService,
     private readonly aiReview: CodingAiReviewService,
     private readonly instructor: CodingInstructorService,
+    private readonly reviewAccess: ReviewAccessService,
   ) {}
 
   // ---- Student ----
@@ -187,6 +189,21 @@ export class CodingController {
   @Get('submissions/:id/commit')
   submissionCommit(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
     return this.submissions.getCommitView(user, id);
+  }
+
+  /**
+   * Whether this reviewer can check the submission out on their own machine.
+   *
+   * Asked before the checkout is attempted: an instructor's access to a
+   * student repository comes from their GitHub organisation role, which
+   * Livetich does not grant and cannot infer from a failed fetch.
+   */
+  @Get('submissions/:id/review-access')
+  submissionReviewAccess(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+  ) {
+    return this.reviewAccess.forSubmission(user, id);
   }
 
   /** One file's text content — from the commit, or the archive (review viewer). */

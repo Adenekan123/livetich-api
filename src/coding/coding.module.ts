@@ -15,6 +15,7 @@ import { GitHubIdentityController } from './git/github-identity.controller';
 import { GitHubIdentityService } from './git/github-identity.service';
 import { ReviewSourceService } from './git/review-source.service';
 import { CommitViewService } from './git/commit-view.service';
+import { ReviewAccessService } from './git/review-access.service';
 
 /**
  * Coding Instructor Plugin. Covers assignment authoring & delivery, the ZIP
@@ -43,6 +44,7 @@ import { CommitViewService } from './git/commit-view.service';
     GitHubIdentityService,
     ReviewSourceService,
     CommitViewService,
+    ReviewAccessService,
   ],
   exports: [
     CodingService,

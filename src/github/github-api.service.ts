@@ -205,6 +205,53 @@ export class GitHubApiService {
   }
 
   /**
+   * What one person may do with one repository, as GitHub itself computes it.
+   *
+   * An instructor's access is not something Livetich grants. Provisioning adds
+   * the *student* as a collaborator and stops there; whether the person doing
+   * the marking may read the repository comes from their own standing in the
+   * organisation — an owner, or a team with read access. None of that is
+   * visible from inside Livetich until a checkout fails on their machine,
+   * which reads like a bug and is not one. So this asks GitHub, whose answer
+   * already accounts for organisation and team access and not only for people
+   * added to a repository one at a time.
+   *
+   * Null when GitHub does not know the user or the repository; `none` when it
+   * knows them and the answer is that they may do nothing.
+   */
+  async collaboratorPermission(
+    installationId: string,
+    ref: RepoRef,
+    username: string,
+  ): Promise<'admin' | 'write' | 'read' | 'none' | null> {
+    const res = await this.request(
+      installationId,
+      `/repos/${ref.owner}/${ref.repo}/collaborators/${encodeURIComponent(username)}/permission`,
+    );
+    if (res.status === 404) return null;
+    const body = await this.json<{ permission?: string }>(
+      res,
+      'read repository permission',
+    );
+    // GitHub answers with five names for four useful answers; maintain and
+    // triage differ from write and read in ways no reviewer cares about.
+    switch (body.permission) {
+      case 'admin':
+      case 'maintain':
+        return 'admin';
+      case 'write':
+        return 'write';
+      case 'read':
+      case 'triage':
+        return 'read';
+      case 'none':
+        return 'none';
+      default:
+        return null;
+    }
+  }
+
+  /**
    * Mark a repository as a template, so student repositories can be generated
    * from it.
    *
