@@ -32,6 +32,24 @@ export class CreateCourseDto {
   @IsString()
   instructorId?: string;
 
+  /**
+   * Short code naming this program in infrastructure — "FE", "BE", "DS".
+   *
+   * Only coding programs need one, but it is set here rather than in a coding
+   * screen because it identifies the program itself. It becomes the first part
+   * of every student's repository name, which is why it is letters and digits
+   * only: the name is slugified and lowercased downstream, so "FE" and "fe"
+   * would produce the same repository and must not be storable as two codes.
+   */
+  @IsOptional()
+  @IsString()
+  @MinLength(2)
+  @MaxLength(16)
+  @Matches(/^[A-Za-z0-9]+$/, {
+    message: 'Use letters and digits only, e.g. FE or BE',
+  })
+  code?: string;
+
   // ---- Cohort program (all optional so drafts can be created, then filled in) ----
 
   @IsOptional()

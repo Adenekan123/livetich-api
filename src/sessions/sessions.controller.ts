@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { Role } from '@prisma/client';
 import { CurrentUser } from '../auth/current-user.decorator';
-import { Public } from '../auth/jwt-auth.guard';
+import { Public, AllowRecorder } from '../auth/jwt-auth.guard';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { Roles } from '../auth/roles.guard';
 import { CreateSessionDto } from './dto/create-session.dto';
@@ -38,6 +38,15 @@ export class SessionsController {
   @Get('course/:courseId/status')
   courseStatus(@Param('courseId') courseId: string) {
     return this.sessions.courseSessionStatus(courseId);
+  }
+
+  /** The class link's own read: enough to render the page for someone who has
+   *  not signed in yet, and nothing about anybody enrolled.
+   *  Declared before :id so "course" isn't matched as a session id. */
+  @Public()
+  @Get('course/:courseId/describe')
+  describeCourse(@Param('courseId') courseId: string) {
+    return this.sessions.describeCourse(courseId);
   }
 
   /** Enter today's live session for a course — materialises it on first join.
@@ -83,6 +92,12 @@ export class SessionsController {
 
   /** Mint a LiveKit join token for the current user.
    *  `as=teach` mints a visible instructor token for a solo-teacher admin. */
+  // The recorder needs this too: it renders the classroom, and the classroom's
+  // video stage asks here for its own token. Refused, the recording has a room
+  // with no video and no audio in it — which is most of the lesson. The service
+  // answers a recorder with a hidden, per-recording identity rather than the
+  // caller's, so this does not widen what the token can do, only where it works.
+  @AllowRecorder()
   @Post(':id/token')
   token(
     @CurrentUser() user: JwtPayload,

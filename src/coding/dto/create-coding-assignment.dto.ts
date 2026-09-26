@@ -9,6 +9,7 @@ import {
   IsISO8601,
   IsOptional,
   IsString,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -89,6 +90,20 @@ export class CreateCodingAssignmentDto {
   @IsOptional()
   @IsString()
   sessionId?: string;
+
+  /**
+   * Where this task's work lives inside the student's course repository, e.g.
+   * "assignments/todo-api" or "live-exercises/lesson-07-navbar" (§18, §20).
+   * Relative to the repository root — a leading slash or a `..` segment would
+   * point outside the student's own workspace, so neither is accepted.
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  @Matches(/^(?!\/)(?!.*\.\.)[A-Za-z0-9._\-/]+$/, {
+    message: 'Use a path inside the repository, like assignments/todo-api',
+  })
+  workspacePath?: string;
 
   @IsOptional()
   @IsISO8601()

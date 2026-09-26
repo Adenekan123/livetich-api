@@ -20,11 +20,13 @@
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
-    "admin:grant": "ts-node scripts/grant-super-admin.ts"
+    "admin:grant": "ts-node scripts/grant-super-admin.ts",
+    "dev:tunnel": "node scripts/dev-tunnel.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.121.0",
     "@aws-sdk/client-s3": "^3.1092.0",
+    "@aws-sdk/s3-request-presigner": "^3.1092.0",
     "@google/genai": "^2.16.0",
     "@nestjs/bullmq": "^11.0.0",
     "@nestjs/common": "^11.0.1",

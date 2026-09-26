@@ -170,7 +170,11 @@ export class SessionsService {
    * materialised on first entry. The instructor arriving flips it LIVE; students
    * may enter beforehand and see the "instructor will join soon" board.
    */
-  async resolveCourseSession(user: JwtPayload, courseId: string, teach = false) {
+  async resolveCourseSession(
+    user: JwtPayload,
+    courseId: string,
+    teach = false,
+  ) {
     const course = await this.prisma.course.findUnique({
       where: { id: courseId },
       select: COURSE_SCHEDULE_SELECT,
@@ -239,6 +243,50 @@ export class SessionsService {
     return { sessionId: session.id };
   }
 
+  /**
+   * What a stranger holding the class link may see, before proving anything.
+   *
+   * The link is the one URL a cohort keeps — put on a home screen, pasted into
+   * a class group — so the page behind it has to render for someone who is not
+   * signed in, and say whether there is a class on right now. That cannot come
+   * from any existing read: every course endpoint is org-scoped, and a visitor
+   * has no org yet.
+   *
+   * So this is deliberately the *smallest* public view of a course, modelled on
+   * the quick-access `describe` beside it: what the class is called, who runs
+   * it, and when it meets. Never who is enrolled, never how many, never
+   * anything about the person asking — and it stays the same answer whoever
+   * asks, so nothing here can be used to probe a roster.
+   */
+  async describeCourse(courseId: string) {
+    const course = await this.prisma.course.findUnique({
+      where: { id: courseId },
+      select: {
+        ...COURSE_SCHEDULE_SELECT,
+        title: true,
+        parentCourse: { select: { title: true } },
+        organization: {
+          select: { name: true, logoUrl: true, primaryColor: true },
+        },
+      },
+    });
+    if (!course) throw new NotFoundException('Course not found');
+
+    const status = await this.courseSessionStatus(courseId);
+    return {
+      courseId: course.id,
+      /** The cohort, e.g. "September 2026". */
+      courseTitle: course.title,
+      /** The program above it, e.g. "Frontend Development". Null for a program. */
+      programTitle: course.parentCourse?.title ?? null,
+      organizationName: course.organization?.name ?? null,
+      logoUrl: course.organization?.logoUrl ?? null,
+      primaryColor: course.organization?.primaryColor ?? null,
+      timezone: course.timezone,
+      ...status,
+    };
+  }
+
   /** Button state for the course page: can I join now, and when is the next meeting. */
   async courseSessionStatus(courseId: string) {
     const course = await this.prisma.course.findUnique({
@@ -281,6 +329,25 @@ export class SessionsService {
     if (!session) throw new NotFoundException('Session not found');
     if (session.status === SessionStatus.ENDED) {
       throw new ConflictException('Session has ended');
+    }
+
+    // A recorder holds a token for exactly one recording of exactly one class,
+    // and must never join as the person who pressed Record. LiveKit allows one
+    // connection per identity: a second one under the instructor's id evicts
+    // the instructor from their own lesson, mid-sentence. So the recorder gets
+    // the same hidden, per-recording identity the recorder context mints, and
+    // is answered here before any of the ownership and attendance logic below —
+    // it is not a participant, and marking it present would put a phantom on
+    // the register.
+    if (user.recorder && user.recorder.sessionId === id) {
+      const token = await this.livekit.mintJoinToken({
+        room: session.livekitRoom,
+        userId: `recorder-${user.recorder.recordingId}`,
+        name: 'Recording',
+        role: user.role,
+        hidden: true,
+      });
+      return { token, url: this.livekit.url, room: session.livekitRoom };
     }
 
     // Admins normally shadow-join: they observe without appearing to anyone. In
@@ -418,8 +485,7 @@ export class SessionsService {
     });
     if (!session) throw new NotFoundException('Session not found');
     const isOwner =
-      user.role === Role.INSTRUCTOR &&
-      session.course.instructorId === user.sub;
+      user.role === Role.INSTRUCTOR && session.course.instructorId === user.sub;
     const isAdmin =
       user.role === Role.ORG_ADMIN &&
       session.course.organizationId === user.organizationId;

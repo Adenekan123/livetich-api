@@ -3,6 +3,9 @@
 #
 #   docker compose --env-file deploy/.env.prod -f docker-compose.prod.yml up -d --build
 #
+# Normally you don't run that: pushing to `staging`/`main` deploys through GitHub
+# Actions, which pulls prebuilt images from GHCR (see deploy/CICD.md).
+#
 # Requires the livetich-web repo checked out alongside this one (../livetich-web).
 name: livetich
 
@@ -32,6 +35,10 @@ services:
       - api
 
   web:
+    # CI builds and pushes this image (see .github/workflows/deploy.yml in
+    # livetich-web); the server only pulls it. DEPLOY_TAG is `staging` on the
+    # staging box, `prod` on production. `build:` stays for a manual build.
+    image: ghcr.io/adenekan123/livetich-web:${DEPLOY_TAG:-prod}
     build:
       context: ../livetich-web
       args:
@@ -56,6 +63,7 @@ services:
       - api
 
   api:
+    image: ghcr.io/adenekan123/livetich-api:${DEPLOY_TAG:-prod}
     build:
       context: .
     restart: unless-stopped

@@ -15,10 +15,13 @@ import { CurrentUser } from '../auth/current-user.decorator';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { Roles } from '../auth/roles.guard';
 import { PLUGIN_TEST_PREP } from '../plugins/catalog';
-import { RequirePlugin, RequirePluginGuard } from '../plugins/require-plugin.guard';
+import {
+  RequirePlugin,
+  RequirePluginGuard,
+} from '../plugins/require-plugin.guard';
 import { AlocService } from './aloc.service';
 import { CreateExamDto } from './dto/create-exam.dto';
-import { ImportQuestionsDto } from './dto/import-questions.dto';
+import { ImportQuestionsDto, ImportYearsDto } from './dto/import-questions.dto';
 import { SubmitExamDto } from './dto/submit-exam.dto';
 import { UpdateExamDto } from './dto/update-exam.dto';
 import { ExamsService } from './exams.service';
@@ -47,6 +50,16 @@ export class ExamsController {
       year: query.year,
       limit: query.limit ?? 20,
     });
+  }
+
+  /** The years this subject + exam type can be imported for, newest first, so
+   *  the year picker only ever offers years that return questions. Free once
+   *  the pair has been imported; the first call for an unseen pair costs one
+   *  credit to seed it. */
+  @Get('exams/import/aloc/years')
+  @Roles(Role.INSTRUCTOR, Role.ORG_ADMIN)
+  alocYears(@Query() query: ImportYearsDto) {
+    return this.aloc.availableYears(query.subject, query.examType);
   }
 
   @Post('courses/:courseId/exams')

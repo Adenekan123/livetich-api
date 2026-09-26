@@ -1,6 +1,7 @@
 import {
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { HifzKind } from '@prisma/client';
@@ -8,8 +9,23 @@ import type { JwtPayload } from '../auth/jwt-payload';
 import { CoursesService } from '../courses/courses.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { validateRef } from '../quran/surahs';
+import { TajweedService } from '../tajweed/tajweed.service';
 import { CreateHifzTargetDto } from './dto/create-target.dto';
 import { LogHifzEntryDto } from './dto/log-entry.dto';
+
+/** What a Hifz entry shows of the Tajweed corrections heard in that recitation. */
+const CORRECTIONS_HEARD = {
+  select: {
+    id: true,
+    surahNumber: true,
+    ayahNumber: true,
+    rule: true,
+    customLabel: true,
+    outcome: true,
+    note: true,
+  },
+  orderBy: { createdAt: 'asc' as const },
+};
 
 /**
  * Qur'an memorization (Hifz) tracking for a course. Instructors/admins set
@@ -18,9 +34,12 @@ import { LogHifzEntryDto } from './dto/log-entry.dto';
  */
 @Injectable()
 export class HifzService {
+  private readonly logger = new Logger(HifzService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly courses: CoursesService,
+    private readonly tajweed: TajweedService,
   ) {}
 
   // ---- Instructor / admin ----------------------------------------------
@@ -43,6 +62,7 @@ export class HifzService {
       this.prisma.hifzEntry.findMany({
         where: { courseId },
         orderBy: { recordedAt: 'desc' },
+        include: { tajweedCorrections: CORRECTIONS_HEARD },
       }),
     ]);
 
@@ -98,7 +118,7 @@ export class HifzService {
       if (!session) throw new ForbiddenException('Session not found in course');
     }
 
-    return this.prisma.hifzEntry.create({
+    const entry = await this.prisma.hifzEntry.create({
       data: {
         courseId,
         studentId: dto.studentId,
@@ -111,6 +131,17 @@ export class HifzService {
         recordedById: user.sub,
       },
     });
+    // The Tajweed corrections the teacher made while listening belong to this
+    // recitation. Linking is a courtesy to the record: if it fails, the
+    // recitation is still saved and the corrections still stand on their own.
+    try {
+      await this.tajweed.linkCorrectionsToRecitation(entry);
+    } catch (e) {
+      this.logger.warn(
+        `Could not link Tajweed corrections to recitation ${entry.id}: ${(e as Error).message}`,
+      );
+    }
+    return entry;
   }
 
   async removeEntry(user: JwtPayload, courseId: string, entryId: string) {
@@ -133,6 +164,7 @@ export class HifzService {
       this.prisma.hifzEntry.findMany({
         where: { courseId, studentId: user.sub },
         orderBy: { recordedAt: 'desc' },
+        include: { tajweedCorrections: CORRECTIONS_HEARD },
       }),
     ]);
     return { targets, entries, progress: summarize(entries) };

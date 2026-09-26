@@ -14,4 +14,22 @@ export interface ObjectStorage {
   get(key: string): Promise<Buffer | null>;
   /** Streamed read (large blobs, e.g. PDF downloads). Null if absent. */
   getStream(key: string): Promise<Readable | null>;
+
+  /** Remove an object. Succeeds whether or not it was there. */
+  delete(key: string): Promise<void>;
+
+  /** Size in bytes, without reading the object. Null if absent. */
+  size(key: string): Promise<number | null>;
+
+  /**
+   * A time-limited URL that plays or downloads the object directly from the
+   * store, so a class recording never passes through this API.
+   *
+   * Null when the backend cannot issue one — local disk in development has no
+   * signing, and callers fall back to streaming it themselves.
+   */
+  signedUrl(
+    key: string,
+    opts?: { expiresInSeconds?: number; downloadAs?: string },
+  ): Promise<string | null>;
 }

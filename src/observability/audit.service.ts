@@ -21,6 +21,21 @@ export const AuditAction = {
   ADMIN_USER_RESET_LINK_SENT: 'admin.user.reset_link_sent',
   ADMIN_USER_EMAIL_VERIFIED: 'admin.user.email_verified',
   ADMIN_USER_IMPERSONATED: 'admin.user.impersonated',
+  // Coding Instructor — GitHub-backed workspaces. A student's code lives
+  // outside Livetich, so the trail of who was given access to what, and which
+  // commit was submitted, is the only record that survives a repository being
+  // archived or an installation being revoked.
+  GITHUB_ORG_CONNECTED: 'github.org.connected',
+  GITHUB_ORG_DISCONNECTED: 'github.org.disconnected',
+  CODING_GITHUB_IDENTITY_CONNECTED: 'coding.github_identity.connected',
+  CODING_GITHUB_IDENTITY_DISCONNECTED: 'coding.github_identity.disconnected',
+  CODING_WORKSPACE_CREATED: 'coding.workspace.created',
+  CODING_WORKSPACE_ACCESS_GRANTED: 'coding.workspace.access_granted',
+  CODING_WORKSPACE_FAILED: 'coding.workspace.failed',
+  CODING_WORKSPACE_ARCHIVED: 'coding.workspace.archived',
+  CODING_SUBMISSION_CREATED: 'coding.submission.created',
+  CODING_SUBMISSION_REVIEWED: 'coding.submission.reviewed',
+  CODING_FEEDBACK_PUBLISHED: 'coding.feedback.published',
 } as const;
 
 export type AuditActionValue =

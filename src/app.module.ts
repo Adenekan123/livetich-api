@@ -19,6 +19,7 @@ import { CoursesModule } from './courses/courses.module';
 import { QuranModule } from './quran/quran.module';
 import { GroupsModule } from './groups/groups.module';
 import { HifzModule } from './hifz/hifz.module';
+import { TajweedModule } from './tajweed/tajweed.module';
 import { PluginsModule } from './plugins/plugins.module';
 import { AssignmentsModule } from './assignments/assignments.module';
 import { CodingModule } from './coding/coding.module';
@@ -34,6 +35,7 @@ import { RealtimeModule } from './realtime/realtime.module';
 import { ObservabilityModule } from './observability/observability.module';
 import { AdminModule } from './admin/admin.module';
 import { RemindersModule } from './reminders/reminders.module';
+import { RecordingsModule } from './recordings/recordings.module';
 
 @Module({
   imports: [
@@ -71,11 +73,13 @@ import { RemindersModule } from './reminders/reminders.module';
     QuranModule,
     GroupsModule,
     HifzModule,
+    TajweedModule,
     AssignmentsModule,
     CodingModule,
     AssessmentModule,
     ExamsModule,
     SessionsModule,
+    RecordingsModule,
     QuizModule,
     PointsModule,
     CertificatesModule,

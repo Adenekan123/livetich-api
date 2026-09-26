@@ -6,13 +6,24 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { CodingAssignmentStatus } from '@prisma/client';
+import {
+  CodingActivityType,
+  CodingAssignmentKind,
+  CodingAssignmentStatus,
+  CodingWorkspaceStatus,
+  GitHubConnectionStatus,
+} from '@prisma/client';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { CoursesService } from '../courses/courses.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { OBJECT_STORAGE } from '../storage/object-storage';
 import type { ObjectStorage } from '../storage/object-storage';
+import { GitHubApiService } from '../github/github-api.service';
+import { AuditAction, AuditService } from '../observability/audit.service';
 import { CodingLiveService } from './coding-live.service';
+import { CommitViewService } from './git/commit-view.service';
+import { SubmitCommitDto } from './dto/submit-commit.dto';
+import { forStudent } from './ai-visibility';
 import {
   indexArchive,
   MAX_ARCHIVE_BYTES,
@@ -52,6 +63,9 @@ export class CodingSubmissionsService {
     private readonly prisma: PrismaService,
     private readonly courses: CoursesService,
     private readonly live: CodingLiveService,
+    private readonly github: GitHubApiService,
+    private readonly commits: CommitViewService,
+    private readonly audit: AuditService,
     @Inject(OBJECT_STORAGE) private readonly storage: ObjectStorage,
   ) {}
 
@@ -121,7 +135,11 @@ export class CodingSubmissionsService {
     });
 
     // Store the immutable archive, then point the row at its served URL.
-    await this.storage.put(archiveKey(submission.id), file.buffer, 'application/zip');
+    await this.storage.put(
+      archiveKey(submission.id),
+      file.buffer,
+      'application/zip',
+    );
     const withUrl = await this.prisma.codingSubmission.update({
       where: { id: submission.id },
       data: { archiveUrl: `/api/coding/files/archive/${submission.id}` },
@@ -135,11 +153,130 @@ export class CodingSubmissionsService {
     return { submission: withUrl, sessionId: assignment.sessionId };
   }
 
+  /**
+   * Submit by pinning a commit in the student's workspace (§19, §21, §22).
+   *
+   * The attempt records a SHA rather than an uploaded archive, so what was
+   * submitted stays fixed for the rest of time: later pushes cannot change what
+   * attempt 2 was, and an instructor can always read exactly the code that was
+   * handed in. No new repository is involved — the same course repository
+   * carries every attempt (§23).
+   */
+  async submitCommit(
+    user: JwtPayload,
+    assignmentId: string,
+    dto: SubmitCommitDto,
+  ) {
+    const assignment = await this.prisma.codingAssignment.findUnique({
+      where: { id: assignmentId },
+      select: {
+        id: true,
+        courseId: true,
+        sessionId: true,
+        kind: true,
+        status: true,
+        maxAttempts: true,
+        allowResubmit: true,
+      },
+    });
+    if (!assignment) throw new NotFoundException('Assignment not found');
+    if (assignment.status === CodingAssignmentStatus.DRAFT) {
+      throw new BadRequestException('This assignment is not open yet');
+    }
+    if (assignment.status === CodingAssignmentStatus.CLOSED) {
+      throw new BadRequestException('This assignment is closed');
+    }
+
+    await this.assertEnrolled(user.sub, assignment.courseId);
+
+    const priorCount = await this.prisma.codingSubmission.count({
+      where: { assignmentId, studentId: user.sub },
+    });
+    if (priorCount >= 1 && !assignment.allowResubmit) {
+      throw new ForbiddenException('Resubmission is not allowed for this task');
+    }
+    if (priorCount >= assignment.maxAttempts) {
+      throw new ForbiddenException('No attempts remaining');
+    }
+
+    // The workspace is found from the enrolment, never from the request: a
+    // student cannot submit a commit that lives in somebody else's repository.
+    const workspace = await this.prisma.codingEnrollmentWorkspace.findFirst({
+      where: { studentId: user.sub, courseId: assignment.courseId },
+      include: { course: { select: { organizationId: true } } },
+    });
+    if (!workspace || workspace.status !== CodingWorkspaceStatus.ACTIVE) {
+      throw new BadRequestException(
+        'Start your coding workspace before submitting',
+      );
+    }
+    if (!workspace.githubRepositoryFullName) {
+      throw new BadRequestException('Your workspace has no repository yet');
+    }
+
+    const connection = workspace.course.organizationId
+      ? await this.prisma.gitHubOrganizationConnection.findUnique({
+          where: { organizationId: workspace.course.organizationId },
+        })
+      : null;
+    if (!connection || connection.status !== GitHubConnectionStatus.ACTIVE) {
+      throw new BadRequestException(
+        'This workspace is no longer connected to GitHub',
+      );
+    }
+
+    // Resolve the SHA before recording anything. A commit that does not exist,
+    // or exists somewhere else, must not become a submission.
+    const [owner, repo] = workspace.githubRepositoryFullName.split('/');
+    const commit = await this.github.getCommit(
+      connection.githubInstallationId,
+      { owner, repo },
+      dto.commitSha,
+    );
+    if (!commit) {
+      throw new BadRequestException(
+        'That commit is not in your repository — save your progress first',
+      );
+    }
+
+    const submission = await this.prisma.codingSubmission.create({
+      data: {
+        assignmentId,
+        studentId: user.sub,
+        attemptNumber: priorCount + 1,
+        activityType:
+          assignment.kind === CodingAssignmentKind.LIVE
+            ? CodingActivityType.LIVE_EXERCISE
+            : CodingActivityType.ASSIGNMENT,
+        workspaceId: workspace.id,
+        commitSha: commit.sha,
+      },
+      include: { assignment: { select: { title: true } } },
+    });
+
+    this.audit.record({
+      action: AuditAction.CODING_SUBMISSION_CREATED,
+      actorId: user.sub,
+      orgId: workspace.course.organizationId,
+      targetType: 'CodingSubmission',
+      targetId: submission.id,
+      metadata: {
+        assignmentId,
+        attemptNumber: submission.attemptNumber,
+        repository: workspace.githubRepositoryFullName,
+        commitSha: commit.sha,
+      },
+    });
+
+    await this.live.broadcastSubmissionUpdate(submission.id);
+    return { submission, sessionId: assignment.sessionId };
+  }
+
   /** Full submission detail — owner or course manager. Students see only
    *  student-visible feedback; managers see everything. */
   async getSubmission(user: JwtPayload, submissionId: string) {
     const { isOwner } = await this.assertAccess(user, submissionId);
-    return this.prisma.codingSubmission.findUnique({
+    const submission = await this.prisma.codingSubmission.findUnique({
       where: { id: submissionId },
       include: {
         files: { orderBy: { path: 'asc' } },
@@ -160,6 +297,27 @@ export class CodingSubmissionsService {
         },
       },
     });
+    if (!submission) return null;
+
+    // The one place both audiences read the same row: a manager sees the AI's
+    // opinion whatever the setting — seeing it first is the point of the flag —
+    // while the student it describes sees it only once released.
+    return forStudent(
+      submission,
+      submission.assignment.showAiToStudents,
+      isOwner,
+    );
+  }
+
+  /**
+   * The submitted commit and what changed in it (§27).
+   *
+   * Null for an upload-backed submission — the caller falls back to the file
+   * list on the detail above rather than showing an empty browser.
+   */
+  async getCommitView(user: JwtPayload, submissionId: string) {
+    await this.assertAccess(user, submissionId);
+    return this.commits.forSubmission(submissionId);
   }
 
   /** Stream the stored archive for download (owner or manager). */
@@ -170,11 +328,24 @@ export class CodingSubmissionsService {
     return stream;
   }
 
-  /** One file's text content from the stored archive (review viewer). */
+  /**
+   * One file's text content for the review viewer.
+   *
+   * Two storage shapes behind one call: a commit-backed submission reads from
+   * GitHub at the exact submitted commit, an uploaded one from the stored
+   * archive. Clicking a file is the same gesture in the panel either way, so
+   * the caller is not made to know which kind it is looking at.
+   */
   async getFileContent(user: JwtPayload, submissionId: string, path: string) {
     await this.assertAccess(user, submissionId);
+
+    const fromCommit = await this.commits.fileAt(submissionId, path);
+    if (fromCommit) return fromCommit;
+
+    // A commit-backed submission has no archive at all, so "archive not found"
+    // would be a misleading way to say "that file isn't readable".
     const buffer = await this.storage.get(archiveKey(submissionId));
-    if (!buffer) throw new NotFoundException('Archive not found');
+    if (!buffer) throw new NotFoundException('File not found or not readable');
     const file = readOneTextFile(buffer, path);
     if (!file) throw new NotFoundException('File not found or not readable');
     return file;
