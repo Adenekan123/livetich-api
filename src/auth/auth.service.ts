@@ -65,8 +65,7 @@ export class AuthService {
       },
     });
 
-    const base =
-      this.config.get<string>('WEB_URL') ?? 'http://localhost:3001';
+    const base = this.config.get<string>('WEB_URL') ?? 'http://localhost:3001';
     const url = `${base}/reset-password?token=${token}`;
     await this.mail.sendPasswordReset(user.email, user.name, url);
   }
@@ -81,7 +80,9 @@ export class AuthService {
       !user.resetTokenExpiresAt ||
       user.resetTokenExpiresAt.getTime() < Date.now()
     ) {
-      throw new BadRequestException('This reset link is invalid or has expired');
+      throw new BadRequestException(
+        'This reset link is invalid or has expired',
+      );
     }
     await this.prisma.user.update({
       where: { id: user.id },
@@ -119,8 +120,8 @@ export class AuthService {
           name: dto.name,
           email: dto.email,
           passwordHash,
-          role: invite!.role,
-          organizationId: invite!.organizationId,
+          role: invite.role,
+          organizationId: invite.organizationId,
         },
       });
       // Multi-workspace source of truth: mirror the join as a Membership so new
@@ -128,25 +129,25 @@ export class AuthService {
       await tx.membership.create({
         data: {
           userId: created.id,
-          organizationId: invite!.organizationId,
-          role: invite!.role,
+          organizationId: invite.organizationId,
+          role: invite.role,
           status: UserStatus.ACTIVE,
         },
       });
       await tx.invite.update({
-        where: { id: invite!.id },
+        where: { id: invite.id },
         data: { uses: { increment: 1 } },
       });
       // Course-scoped link: land the new user straight in that program. A
       // student is enrolled; an instructor is assigned to teach it.
-      if (invite!.courseId) {
-        if (invite!.role === Role.STUDENT) {
+      if (invite.courseId) {
+        if (invite.role === Role.STUDENT) {
           await tx.enrollment.create({
-            data: { courseId: invite!.courseId, studentId: created.id },
+            data: { courseId: invite.courseId, studentId: created.id },
           });
-        } else if (invite!.role === Role.INSTRUCTOR) {
+        } else if (invite.role === Role.INSTRUCTOR) {
           await tx.course.update({
-            where: { id: invite!.courseId },
+            where: { id: invite.courseId },
             data: { instructorId: created.id },
           });
         }
@@ -159,7 +160,9 @@ export class AuthService {
   }
 
   /** Company signup — creates the Organization and its first ORG_ADMIN. */
-  async registerOrganization(dto: RegisterOrganizationDto): Promise<AuthResult> {
+  async registerOrganization(
+    dto: RegisterOrganizationDto,
+  ): Promise<AuthResult> {
     await this.assertEmailFree(dto.email);
     const passwordHash = await bcryptHash(dto.password, BCRYPT_ROUNDS);
     const slug = await this.uniqueSlug(dto.organizationName);
@@ -199,7 +202,11 @@ export class AuthService {
     return this.toAuthResult(user);
   }
 
-  async changePassword(userId: string, currentPassword: string, newPassword: string) {
+  async changePassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string,
+  ) {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new UnauthorizedException('Not signed in');
     const ok = await bcryptVerify(currentPassword, user.passwordHash);
@@ -349,7 +356,9 @@ export class AuthService {
    * The workspaces this identity can currently act in (its active memberships),
    * for the workspace switcher. One account can belong to several orgs.
    */
-  async listWorkspaces(userId: string): Promise<
+  async listWorkspaces(
+    userId: string,
+  ): Promise<
     { organizationId: string; organizationName: string; role: Role }[]
   > {
     const memberships = await this.prisma.membership.findMany({
@@ -403,44 +412,90 @@ export class AuthService {
    * multi-workspace fix). Returns a session scoped to the joined workspace so
    * the client lands in it. Idempotent: already a member -> just switches in.
    */
-  async joinWorkspace(userId: string, inviteToken: string): Promise<AuthResult> {
+  async joinWorkspace(
+    userId: string,
+    inviteToken: string,
+  ): Promise<AuthResult> {
     const { orgId, role } = await this.prisma.$transaction(async (tx) => {
-      const invite = await tx.invite.findUnique({ where: { token: inviteToken } });
+      const invite = await tx.invite.findUnique({
+        where: { token: inviteToken },
+      });
       this.assertInviteUsable(invite);
-      const organizationId = invite!.organizationId;
+      const organizationId = invite.organizationId;
       const existing = await tx.membership.findUnique({
         where: { userId_organizationId: { userId, organizationId } },
       });
-      if (existing) return { orgId: organizationId, role: existing.role };
 
-      await tx.membership.create({
-        data: { userId, organizationId, role: invite!.role, status: UserStatus.ACTIVE },
-      });
-      await tx.invite.update({
-        where: { id: invite!.id },
-        data: { uses: { increment: 1 } },
-      });
+      // Already a member used to return here, which quietly skipped everything
+      // below — so a student already in this school who opened a link for a
+      // *second* program joined nothing at all. The membership existed, the
+      // enrolment was never written, and the only symptom was "Not enrolled"
+      // at the door of a class they had just been told they were in. Belonging
+      // to the school and being enrolled in one of its programs are two
+      // different facts, and a course-scoped link is about the second.
+      let granted = false;
+      if (!existing) {
+        await tx.membership.create({
+          data: {
+            userId,
+            organizationId,
+            role: invite.role,
+            status: UserStatus.ACTIVE,
+          },
+        });
+        granted = true;
+      }
+
       // Course-scoped link: enrol the student / assign the instructor.
-      if (invite!.courseId) {
-        if (invite!.role === Role.STUDENT) {
-          await tx.enrollment.upsert({
-            where: { courseId_studentId: { courseId: invite!.courseId, studentId: userId } },
-            create: { courseId: invite!.courseId, studentId: userId },
-            update: {},
+      if (invite.courseId) {
+        // Their standing in this school decides what the link may do — not the
+        // role written on the invite. An instructor here does not become a
+        // student by opening a student link.
+        const role = existing?.role ?? invite.role;
+        if (role === Role.STUDENT) {
+          const already = await tx.enrollment.findUnique({
+            where: {
+              courseId_studentId: {
+                courseId: invite.courseId,
+                studentId: userId,
+              },
+            },
+            select: { id: true },
           });
-        } else if (invite!.role === Role.INSTRUCTOR) {
+          if (!already) {
+            await tx.enrollment.create({
+              data: { courseId: invite.courseId, studentId: userId },
+            });
+            granted = true;
+          }
+        } else if (role === Role.INSTRUCTOR) {
           await tx.course.update({
-            where: { id: invite!.courseId },
+            where: { id: invite.courseId },
             data: { instructorId: userId },
           });
         }
       }
-      return { orgId: organizationId, role: invite!.role };
+
+      // A use is spent when the link actually did something for this person.
+      // Opening it twice should not burn two of a limited run.
+      if (granted) {
+        await tx.invite.update({
+          where: { id: invite.id },
+          data: { uses: { increment: 1 } },
+        });
+      }
+      return { orgId: organizationId, role: existing?.role ?? invite.role };
     });
 
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, name: true, email: true, emailVerified: true, isSuperAdmin: true },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        emailVerified: true,
+        isSuperAdmin: true,
+      },
     });
     if (!user) throw new UnauthorizedException('Account not found');
     return this.toAuthResult({ ...user, role, organizationId: orgId });
@@ -477,10 +532,20 @@ export class AuthService {
 
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, name: true, email: true, emailVerified: true, isSuperAdmin: true },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        emailVerified: true,
+        isSuperAdmin: true,
+      },
     });
     if (!user) throw new UnauthorizedException('Account not found');
-    return this.toAuthResult({ ...user, role: Role.ORG_ADMIN, organizationId: orgId });
+    return this.toAuthResult({
+      ...user,
+      role: Role.ORG_ADMIN,
+      organizationId: orgId,
+    });
   }
 
   /**

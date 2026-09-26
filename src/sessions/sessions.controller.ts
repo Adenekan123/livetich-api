@@ -40,6 +40,15 @@ export class SessionsController {
     return this.sessions.courseSessionStatus(courseId);
   }
 
+  /** The class link's own read: enough to render the page for someone who has
+   *  not signed in yet, and nothing about anybody enrolled.
+   *  Declared before :id so "course" isn't matched as a session id. */
+  @Public()
+  @Get('course/:courseId/describe')
+  describeCourse(@Param('courseId') courseId: string) {
+    return this.sessions.describeCourse(courseId);
+  }
+
   /** Enter today's live session for a course — materialises it on first join.
    *  `as=teach` lets an org admin enter as the instructor (solo-teacher mode). */
   @Post('course/:courseId/join')

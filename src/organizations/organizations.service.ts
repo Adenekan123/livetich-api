@@ -85,7 +85,9 @@ export class OrganizationsService {
 
   async createInvite(orgId: string, userId: string, dto: CreateInviteDto) {
     if (dto.role !== Role.STUDENT && dto.role !== Role.INSTRUCTOR) {
-      throw new BadRequestException('Invite role must be STUDENT or INSTRUCTOR');
+      throw new BadRequestException(
+        'Invite role must be STUDENT or INSTRUCTOR',
+      );
     }
     // A course-scoped link must point at a program this org actually owns.
     if (dto.courseId) {
@@ -147,13 +149,43 @@ export class OrganizationsService {
     });
   }
 
-  /** Public: resolve a join link into the org brand + role, or {valid:false}. */
+  /**
+   * Public: resolve a join link into the org brand + role, or {valid:false}.
+   *
+   * A course-scoped link is the closest thing the product has to an enrolment
+   * page: the instructor takes payment however they take it, then sends this
+   * link, and opening it signs the student up, puts them in the workspace and
+   * enrols them in one go. So it has to answer the questions somebody decides
+   * on before pressing a button — what is this, when does it meet, who teaches
+   * it, how long does it run — not just name the organisation.
+   *
+   * Still nothing about anyone enrolled, and still the same answer for every
+   * visitor: the token is the secret, and what it unlocks is a description.
+   */
   async resolveInvite(token: string) {
     const invite = await this.prisma.invite.findUnique({
       where: { token },
       include: {
         organization: { select: BRAND_SELECT },
-        course: { select: { id: true, title: true } },
+        course: {
+          select: {
+            id: true,
+            title: true,
+            description: true,
+            category: true,
+            level: true,
+            startDate: true,
+            durationWeeks: true,
+            meetingDays: true,
+            meetingTime: true,
+            meetingTimesByDay: true,
+            timezone: true,
+            // The program above the intake, so the page can say "Frontend
+            // Development · September 2026" rather than only the batch name.
+            parentCourse: { select: { id: true, title: true } },
+            instructor: { select: { name: true } },
+          },
+        },
       },
     });
     if (!invite || this.statusOf(invite) !== 'ACTIVE') return { valid: false };
@@ -190,10 +222,13 @@ export class OrganizationsService {
    *  org can't be targeted. Disabling ends the member's active session. */
   async setMemberStatus(orgId: string, memberId: string, status: UserStatus) {
     const member = await this.prisma.membership.findUnique({
-      where: { userId_organizationId: { userId: memberId, organizationId: orgId } },
+      where: {
+        userId_organizationId: { userId: memberId, organizationId: orgId },
+      },
       select: { role: true },
     });
-    if (!member) throw new NotFoundException('Member not found in your organization');
+    if (!member)
+      throw new NotFoundException('Member not found in your organization');
     if (member.role === Role.ORG_ADMIN) {
       throw new BadRequestException('Admin accounts cannot be disabled here');
     }
@@ -215,7 +250,11 @@ export class OrganizationsService {
     const students = await this.prisma.user.findMany({
       where: {
         memberships: {
-          some: { organizationId: orgId, role: Role.STUDENT, status: UserStatus.ACTIVE },
+          some: {
+            organizationId: orgId,
+            role: Role.STUDENT,
+            status: UserStatus.ACTIVE,
+          },
         },
         ...(courseId && { enrollments: { some: { courseId } } }),
       },
