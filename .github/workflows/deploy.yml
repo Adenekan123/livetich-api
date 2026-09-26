@@ -1,0 +1,88 @@
+# Push to `staging` → staging box. Push to `main` → production.
+# Tests gate the build; the server only pulls the image CI built (see deploy/CICD.md).
+name: deploy
+
+on:
+  push:
+    branches: [staging, main]
+  workflow_dispatch:
+
+# One deploy per branch at a time; a newer push waits rather than racing.
+concurrency:
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/adenekan123/livetich-api
+  TAG: ${{ github.ref_name == 'main' && 'prod' || 'staging' }}
+  ENVIRONMENT: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm prisma generate
+      - run: pnpm test
+      - run: pnpm build
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # :sha tags are kept for rollback (see deploy/CICD.md).
+          tags: |
+            ${{ env.IMAGE }}:${{ env.TAG }}
+            ${{ env.IMAGE }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ env.TAG }}
+          cache-to: type=gha,mode=max,scope=${{ env.TAG }}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          command_timeout: 15m
+          script: |
+            set -e
+            cd "${{ vars.APP_DIR }}/livetich-api"
+            # Keep compose/Caddyfile in step with the image. --ff-only refuses
+            # rather than clobbering any hand edits made on the box.
+            git fetch -q origin
+            git checkout -q ${{ github.ref_name }}
+            git pull -q --ff-only origin ${{ github.ref_name }}
+            if [ "${{ env.ENVIRONMENT }}" = "production" ]; then ./deploy/backup.sh; fi
+            C="docker compose --env-file deploy/.env.prod -f docker-compose.prod.yml"
+            $C pull api
+            # --wait blocks until the container's healthcheck (/health) passes,
+            # so a broken release fails this job instead of going quiet.
+            $C up -d --no-build --wait --wait-timeout 300 api
+            docker image prune -f >/dev/null
+            echo "Deployed ${{ github.sha }} to ${{ env.ENVIRONMENT }}"
