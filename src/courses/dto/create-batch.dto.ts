@@ -9,6 +9,7 @@ import {
   Max,
   MaxLength,
   Min,
+  MinLength,
 } from 'class-validator';
 
 /**
@@ -29,6 +30,23 @@ export class CreateBatchDto {
   @IsOptional()
   @IsString()
   instructorId?: string;
+
+  /**
+   * Short code for this intake — "SEP26", "JAN27".
+   *
+   * Unique within the program, not the workspace: two programs both running a
+   * September 2026 cohort is ordinary. Together with the program's code and the
+   * enrolment number it names a coding student's repository, so it is letters
+   * and digits only for the same reason the program's code is.
+   */
+  @IsOptional()
+  @IsString()
+  @MinLength(2)
+  @MaxLength(16)
+  @Matches(/^[A-Za-z0-9]+$/, {
+    message: 'Use letters and digits only, e.g. SEP26',
+  })
+  code?: string;
 
   /** ISO date/datetime; the batch's first day (may differ from the program). */
   @IsOptional()

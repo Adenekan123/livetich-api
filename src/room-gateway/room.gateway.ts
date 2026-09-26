@@ -25,8 +25,17 @@ import type {
   RoomScheme,
   RoomUser,
   ServerToClientEvents,
+  TajweedPart,
+  TajweedTemporaryAnnotation,
 } from '../shared';
 import { ROOM_SCHEMES } from '../shared';
+import { firstAyahOf, validateParts } from '../quran/quran-words';
+import {
+  ANNOTATION_ID,
+  cleanText,
+  HEX_COLOR,
+  isTajweedRule,
+} from '../tajweed/tajweed-input';
 import { RoomStateService } from './room-state.service';
 import { RoomBroadcaster, staffRoom } from '../realtime/room-broadcaster';
 import { PluginsService } from '../plugins/plugins.service';
@@ -44,6 +53,9 @@ interface SocketData {
   /** An org admin who joined in teach-mode (solo teacher): treated as the
    *  session's host for the life of this socket rather than a shadow observer. */
   teaching?: boolean;
+  /** Joined without entering presence — a shadowing admin, or a recorder. Kept
+   *  for the life of the socket so leaving can be as invisible as arriving. */
+  shadow?: boolean;
 }
 
 type RoomServer = Server<
@@ -130,6 +142,20 @@ export class RoomGateway
     }
     client.data.user = user;
     client.data.sessionIds = new Set();
+    // A recorder token is a camera, not a participant. It names the person who
+    // pressed Record, so every ownership check in here would wave it through —
+    // which means the one place to stop it writing is before any handler runs,
+    // not in each of them. Anything but the join is dropped, and future
+    // handlers are covered without having to remember this.
+    if (user.recorder) {
+      client.use((packet, next) => {
+        const event = (packet as unknown[])[0];
+        if (event === 'room:join') return next();
+        // Dropped silently: an error here would only tell a browser we do not
+        // control something it cannot act on.
+        return;
+      });
+    }
 
     // Same gate as the HTTP guard: disabled or unverified accounts can't hold a
     // live socket (the token is long-lived, so re-check against current state).
@@ -153,6 +179,7 @@ export class RoomGateway
       // erase the presence the new socket just added, and the instructor (or a
       // student) would vanish for everyone — the "will join soon" that never
       // clears. Only the last socket out actually removes the entry.
+      if (client.data.shadow) continue;
       if (await this.userStillInRoom(sessionId, user.sub, client.id)) continue;
       await this.state.removePresence(sessionId, user.sub);
       await this.state.lowerHand(sessionId, user.sub);
@@ -203,9 +230,20 @@ export class RoomGateway
     // own or be enrolled.
     const isAdmin = user.role === Role.ORG_ADMIN;
     const teaching = isAdmin && p.as === 'teach';
-    const shadow = isAdmin && !teaching;
+    // A recorder watches the way a shadowing admin does: it must never enter
+    // presence, or the class would see a participant appear and learn it is
+    // being recorded — the one thing this feature promises not to reveal.
+    const isRecorder = user.recorder?.sessionId === p.sessionId;
+    const shadow = (isAdmin && !teaching) || isRecorder;
     client.data.teaching = teaching;
-    if (user.role === Role.INSTRUCTOR) {
+    client.data.shadow = shadow;
+    if (user.recorder && !isRecorder) {
+      return this.fail(client, 'FORBIDDEN', 'Not the session this token films');
+    }
+    if (isRecorder) {
+      // Already established by the claim itself; no ownership test applies,
+      // because the recorder is not acting as anyone.
+    } else if (user.role === Role.INSTRUCTOR) {
       if (session.course.instructorId !== user.sub) {
         return this.fail(client, 'FORBIDDEN', 'Not your session');
       }
@@ -278,6 +316,10 @@ export class RoomGateway
       }
       const pos = await this.state.getQuranPos(p.sessionId);
       client.emit('quran:position', { sessionId: p.sessionId, ...pos });
+      // Whatever the instructor is pointing at right now, so a late joiner
+      // sees the same marked words as everyone else.
+      await this.sendTajweedTemporary(p.sessionId, client);
+      await this.sendTajweedPointing(p.sessionId, client);
     }
     await this.broadcastHands(p.sessionId, client);
     await this.broadcastSpeakers(p.sessionId, client);
@@ -326,10 +368,26 @@ export class RoomGateway
     const user = client.data.user;
     await client.leave(p.sessionId);
     client.data.sessionIds.delete(p.sessionId);
-    await this.state.removePresence(p.sessionId, user.sub);
-    await this.state.lowerHand(p.sessionId, user.sub);
-    await this.broadcastPresence(p.sessionId);
-    await this.broadcastHands(p.sessionId);
+    // The same two guards handleDisconnect has, for the same reasons — this
+    // path had neither.
+    //
+    // A shadow socket never entered presence, so it has none to remove. That
+    // matters most for a recorder, whose token names the person who pressed
+    // Record: without this, stopping a recording removed *the instructor's*
+    // presence and they vanished for every student mid-lesson.
+    //
+    // And presence is keyed by userId, so even a visible socket must not clear
+    // an entry another live socket of the same user is still holding — the
+    // second-tab case, which this path got wrong for everyone.
+    if (
+      !client.data.shadow &&
+      !(await this.userStillInRoom(p.sessionId, user.sub, client.id))
+    ) {
+      await this.state.removePresence(p.sessionId, user.sub);
+      await this.state.lowerHand(p.sessionId, user.sub);
+      await this.broadcastPresence(p.sessionId);
+      await this.broadcastHands(p.sessionId);
+    }
   }
 
   // ---------- Chat ----------
@@ -477,6 +535,143 @@ export class RoomGateway
     this.server
       .to(p.sessionId)
       .emit('quran:position', { sessionId: p.sessionId, ...pos });
+  }
+
+  // ---------- Live Tajweed annotations ----------
+
+  /**
+   * Show a live annotation to the room.
+   *
+   * Live annotations are for teaching in the moment: they sit in the session's
+   * Redis state and never reach the database unless the instructor saves one
+   * to the lesson over HTTP. They are held to the same checks as a saved one —
+   * the reference must exist in the Qur'an, the rule must be known, the note is
+   * plain text — because every student's screen renders what is sent here.
+   */
+  @SubscribeMessage('tajweed:temporary:set')
+  async onTajweedTemporarySet(
+    @ConnectedSocket() client: RoomSocket,
+    @MessageBody()
+    p: {
+      sessionId: string;
+      annotation: Omit<TajweedTemporaryAnnotation, 'expiresAt'> & { ttlSec?: number };
+    },
+  ) {
+    const session = await this.ownedSession(client, p.sessionId);
+    if (!session) return;
+    if (
+      !(await this.plugins.isEnabled(
+        session.course.organizationId,
+        PLUGIN_ISLAMIC_EDUCATION,
+      ))
+    ) {
+      return this.fail(client, 'PLUGIN_DISABLED', 'Add-on not enabled');
+    }
+    const a = p.annotation;
+    if (!a || typeof a.id !== 'string' || !ANNOTATION_ID.test(a.id)) {
+      return this.fail(client, 'BAD_REQUEST', 'Invalid annotation id');
+    }
+    if (!isTajweedRule(a.rule)) {
+      return this.fail(client, 'BAD_REQUEST', 'Unknown Tajweed rule');
+    }
+    let parts;
+    try {
+      parts = validateParts(a.parts);
+    } catch (e) {
+      return this.fail(client, 'BAD_REQUEST', (e as Error).message);
+    }
+    const customLabel = cleanText(a.customLabel, 60);
+    if (a.rule === 'custom' && !customLabel) {
+      return this.fail(client, 'BAD_REQUEST', 'Give the custom note a label');
+    }
+    const ttlSec = Math.min(3600, Math.max(0, Math.trunc(Number(a.ttlSec) || 0)));
+    const annotation: TajweedTemporaryAnnotation = {
+      id: a.id,
+      ...firstAyahOf(parts),
+      parts,
+      rule: a.rule,
+      customLabel,
+      style: a.style === 'UNDERLINE' ? 'UNDERLINE' : 'HIGHLIGHT',
+      color: typeof a.color === 'string' && HEX_COLOR.test(a.color) ? a.color : null,
+      note: cleanText(a.note, 1000),
+      expiresAt: ttlSec ? new Date(Date.now() + ttlSec * 1000).toISOString() : null,
+    };
+    if (!(await this.state.setTajweedTemporary(p.sessionId, annotation))) {
+      return this.fail(
+        client,
+        'LIMIT',
+        'Too many live annotations — clear some before adding more',
+      );
+    }
+    await this.sendTajweedTemporary(p.sessionId);
+  }
+
+  /** Clear one live annotation, or all of them. */
+  @SubscribeMessage('tajweed:temporary:clear')
+  async onTajweedTemporaryClear(
+    @ConnectedSocket() client: RoomSocket,
+    @MessageBody() p: { sessionId: string; id?: string },
+  ) {
+    if (!(await this.isOwner(client, p.sessionId))) return;
+    const id = typeof p.id === 'string' && ANNOTATION_ID.test(p.id) ? p.id : undefined;
+    await this.state.clearTajweedTemporary(p.sessionId, id);
+    await this.sendTajweedTemporary(p.sessionId);
+  }
+
+  /**
+   * Show the class what the instructor has picked, before any rule.
+   *
+   * This is the selection itself, not a mark: every screen outlines the same
+   * letters while the teacher decides which rule it is. Sending an empty list
+   * takes the outline away, and nothing here is ever stored.
+   */
+  @SubscribeMessage('tajweed:pointing:set')
+  async onTajweedPointingSet(
+    @ConnectedSocket() client: RoomSocket,
+    @MessageBody() p: { sessionId: string; parts: TajweedPart[] },
+  ) {
+    if (!(await this.isOwner(client, p.sessionId))) return;
+    let parts: TajweedPart[] = [];
+    if (Array.isArray(p.parts) && p.parts.length) {
+      try {
+        parts = validateParts(p.parts);
+      } catch (e) {
+        return this.fail(client, 'BAD_REQUEST', (e as Error).message);
+      }
+    }
+    await this.state.setTajweedPointing(p.sessionId, parts);
+    await this.sendTajweedPointing(p.sessionId);
+  }
+
+  /** Stop pointing — the teacher closed the selection or marked it. */
+  @SubscribeMessage('tajweed:pointing:clear')
+  async onTajweedPointingClear(
+    @ConnectedSocket() client: RoomSocket,
+    @MessageBody() p: { sessionId: string },
+  ) {
+    if (!(await this.isOwner(client, p.sessionId))) return;
+    await this.state.setTajweedPointing(p.sessionId, []);
+    await this.sendTajweedPointing(p.sessionId);
+  }
+
+  /** The full live list — to one joining client, or to the whole room. */
+  private async sendTajweedTemporary(sessionId: string, client?: RoomSocket) {
+    const payload = {
+      sessionId,
+      annotations: await this.state.listTajweedTemporary(sessionId),
+    };
+    if (client) client.emit('tajweed:temporary', payload);
+    else this.server.to(sessionId).emit('tajweed:temporary', payload);
+  }
+
+  /** What is pointed at — to one joining client, or to the whole room. */
+  private async sendTajweedPointing(sessionId: string, client?: RoomSocket) {
+    const payload = {
+      sessionId,
+      parts: await this.state.getTajweedPointing(sessionId),
+    };
+    if (client) client.emit('tajweed:pointing', payload);
+    else this.server.to(sessionId).emit('tajweed:pointing', payload);
   }
 
   // ---------- Raised hands ----------

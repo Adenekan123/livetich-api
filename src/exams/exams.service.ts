@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -300,14 +301,31 @@ export class ExamsService {
     if (!exam || !exam.active) throw new NotFoundException('Exam not found');
     await this.assertEnrolled(user, exam.courseId);
 
-    // Resume an unsubmitted attempt rather than spawning duplicates.
+    // Resume an unsubmitted attempt rather than spawning duplicates. Resuming
+    // is not a second sitting: the clock still runs from the original
+    // startedAt, so closing the tab costs the time it cost.
     let attempt = await this.prisma.examAttempt.findFirst({
       where: { examId, studentId: user.sub, submittedAt: null },
       orderBy: { startedAt: 'desc' },
     });
-    attempt ??= await this.prisma.examAttempt.create({
-      data: { examId, studentId: user.sub },
-    });
+
+    if (!attempt) {
+      // One sitting each. Checked before creating rather than trusted to the
+      // UI, which is where the old Retake button lived — an exam a student can
+      // re-sit until the score suits them measures persistence, not learning.
+      const alreadySat = await this.prisma.examAttempt.findFirst({
+        where: { examId, studentId: user.sub, submittedAt: { not: null } },
+        select: { id: true },
+      });
+      if (alreadySat) {
+        throw new ConflictException(
+          'You have already sat this exam. Open the review to see your answers.',
+        );
+      }
+      attempt = await this.prisma.examAttempt.create({
+        data: { examId, studentId: user.sub },
+      });
+    }
 
     const deadline = new Date(
       attempt.startedAt.getTime() + exam.durationMinutes * 60_000,

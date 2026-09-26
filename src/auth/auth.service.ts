@@ -297,6 +297,23 @@ export class AuthService {
     return `${base}-${Date.now().toString(36)}`;
   }
 
+  /**
+   * Sign in a user the quick-access shortcut has already vouched for.
+   *
+   * Kept here rather than in QuickAccessService so that every session in the
+   * system is minted by exactly one piece of code. A quick-access session is
+   * not a lesser session with its own rules to remember — it is the same token,
+   * the same claims and the same expiry as an email-and-password login.
+   */
+  async sessionFor(userId: string): Promise<AuthResult> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new UnauthorizedException('Invalid credentials');
+    if (user.status === UserStatus.DISABLED) {
+      throw new ForbiddenException('This account has been disabled');
+    }
+    return this.toAuthResult(user);
+  }
+
   private toAuthResult(user: {
     id: string;
     name: string;

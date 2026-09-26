@@ -283,6 +283,25 @@ export class SessionsService {
       throw new ConflictException('Session has ended');
     }
 
+    // A recorder holds a token for exactly one recording of exactly one class,
+    // and must never join as the person who pressed Record. LiveKit allows one
+    // connection per identity: a second one under the instructor's id evicts
+    // the instructor from their own lesson, mid-sentence. So the recorder gets
+    // the same hidden, per-recording identity the recorder context mints, and
+    // is answered here before any of the ownership and attendance logic below —
+    // it is not a participant, and marking it present would put a phantom on
+    // the register.
+    if (user.recorder && user.recorder.sessionId === id) {
+      const token = await this.livekit.mintJoinToken({
+        room: session.livekitRoom,
+        userId: `recorder-${user.recorder.recordingId}`,
+        name: 'Recording',
+        role: user.role,
+        hidden: true,
+      });
+      return { token, url: this.livekit.url, room: session.livekitRoom };
+    }
+
     // Admins normally shadow-join: they observe without appearing to anyone. In
     // teach-mode a solo-teacher admin instead joins as the instructor — visible,
     // publishing, and with an INSTRUCTOR token so the room grants host powers.

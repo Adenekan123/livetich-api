@@ -1,5 +1,5 @@
 import { createReadStream } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { Readable } from 'node:stream';
 import { ObjectStorage } from './object-storage';
@@ -24,6 +24,24 @@ export class LocalObjectStorage implements ObjectStorage {
     } catch {
       return null;
     }
+  }
+
+  async delete(key: string): Promise<void> {
+    // force: absent files are not an error — deleting twice is fine.
+    await rm(this.pathFor(key), { force: true });
+  }
+
+  async size(key: string): Promise<number | null> {
+    try {
+      return (await stat(this.pathFor(key))).size;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Local disk cannot sign anything; callers stream it through the API. */
+  signedUrl(): Promise<string | null> {
+    return Promise.resolve(null);
   }
 
   getStream(key: string): Promise<Readable | null> {

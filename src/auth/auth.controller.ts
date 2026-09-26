@@ -1,8 +1,19 @@
-import { Body, Controller, Get, HttpCode, Post, Req } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  Param,
+  Post,
+  Req,
+} from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { AuditAction, AuditService, clientIp } from '../observability/audit.service';
 import { AuthService } from './auth.service';
+import { QuickAccessService } from './quick-access.service';
 import { CurrentUser } from './current-user.decorator';
 import { AdminReauthDto } from './dto/admin-reauth.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
@@ -14,6 +25,10 @@ import { ResetPasswordDto } from './dto/reset-password.dto';
 import { RegisterDto } from './dto/register.dto';
 import { RegisterOrganizationDto } from './dto/register-organization.dto';
 import { SwitchWorkspaceDto } from './dto/switch-workspace.dto';
+import {
+  RedeemQuickAccessDto,
+  SetQuickAccessDto,
+} from './dto/quick-access.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
 import { AllowUnverified, Public } from './jwt-auth.guard';
 import type { JwtPayload } from './jwt-payload';
@@ -25,7 +40,86 @@ export class AuthController {
   constructor(
     private readonly auth: AuthService,
     private readonly audit: AuditService,
+    private readonly quickAccess: QuickAccessService,
   ) {}
+
+  // ---------- Quick access ----------
+  //
+  // A student's home-screen shortcut: an opaque slug in the URL, a six-digit
+  // code behind it. Redeeming both mints the same session a password login
+  // does, so nothing downstream needs to know this door exists.
+
+  /** Create or rotate this student's shortcut for their current workspace. */
+  @Post('quick-access')
+  @HttpCode(200)
+  async setQuickAccess(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: SetQuickAccessDto,
+  ) {
+    if (!user.organizationId) {
+      throw new BadRequestException('Join a workspace first');
+    }
+    return this.quickAccess.setPasscode(
+      user.sub,
+      user.organizationId,
+      dto.passcode,
+    );
+  }
+
+  /** The student's existing shortcut, if they have one. */
+  @Get('quick-access')
+  async getQuickAccess(@CurrentUser() user: JwtPayload) {
+    if (!user.organizationId) return null;
+    return this.quickAccess.current(user.sub, user.organizationId);
+  }
+
+  @Delete('quick-access')
+  @HttpCode(204)
+  async revokeQuickAccess(@CurrentUser() user: JwtPayload) {
+    if (user.organizationId) {
+      await this.quickAccess.revoke(user.sub, user.organizationId);
+    }
+  }
+
+  /**
+   * Branding for the passcode screen. Public by necessity — it is shown before
+   * anyone has proved anything — so it returns the workspace and nothing about
+   * the student the shortcut belongs to.
+   */
+  @Public()
+  @Get('quick-access/:slug')
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  describeQuickAccess(@Param('slug') slug: string) {
+    return this.quickAccess.describe(slug);
+  }
+
+  /**
+   * Redeem the shortcut. Throttled hard at the edge as well as per-shortcut in
+   * the service: the per-shortcut lockout stops one link being ground down, and
+   * this stops one caller working through many links at once.
+   */
+  @Public()
+  @Post('quick-access/:slug')
+  @HttpCode(200)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  async redeemQuickAccess(
+    @Param('slug') slug: string,
+    @Body() dto: RedeemQuickAccessDto,
+    @Req() req: Request,
+  ) {
+    const { userId } = await this.quickAccess.redeem(slug, dto.passcode);
+    const result = await this.auth.sessionFor(userId);
+    this.audit.record({
+      action: AuditAction.AUTH_LOGIN_SUCCESS,
+      actorId: result.user.id,
+      actorEmail: result.user.email,
+      actorRole: result.user.role,
+      orgId: result.user.organizationId,
+      ip: clientIp(req),
+      metadata: { via: 'quick-access' },
+    });
+    return result;
+  }
 
   @Public()
   @Post('register')

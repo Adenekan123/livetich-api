@@ -8,6 +8,7 @@ import {
   Query,
   StreamableFile,
   UploadedFile,
+  UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
@@ -15,15 +16,22 @@ import { Role } from '@prisma/client';
 import { CurrentUser } from '../auth/current-user.decorator';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { Roles } from '../auth/roles.guard';
+import { PLUGIN_CODE_INSTRUCTION } from '../plugins/catalog';
+import {
+  RequirePlugin,
+  RequirePluginGuard,
+} from '../plugins/require-plugin.guard';
 import { CodingService } from './coding.service';
 import { CodingSubmissionsService } from './coding-submissions.service';
 import { CodingAiReviewService } from './coding-ai-review.service';
 import { CodingInstructorService } from './coding-instructor.service';
+import { ReviewAccessService } from './git/review-access.service';
 import { MAX_ARCHIVE_BYTES } from './coding-archive.util';
 import { CreateCodingAssignmentDto } from './dto/create-coding-assignment.dto';
 import { DecisionDto } from './dto/decision.dto';
 import { CreateFeedbackDto } from './dto/feedback.dto';
 import { LaunchAssignmentDto } from './dto/launch-assignment.dto';
+import { SubmitCommitDto } from './dto/submit-commit.dto';
 import { UpdateCodingAssignmentDto } from './dto/update-coding-assignment.dto';
 
 /** Multer memory-storage file (subset) — avoids a hard Express type dependency. */
@@ -36,12 +44,15 @@ interface UploadedBlob {
 
 /** Coding Instructor Plugin — assignment authoring, delivery & submissions. */
 @Controller('coding')
+@UseGuards(RequirePluginGuard)
+@RequirePlugin(PLUGIN_CODE_INSTRUCTION)
 export class CodingController {
   constructor(
     private readonly coding: CodingService,
     private readonly submissions: CodingSubmissionsService,
     private readonly aiReview: CodingAiReviewService,
     private readonly instructor: CodingInstructorService,
+    private readonly reviewAccess: ReviewAccessService,
   ) {}
 
   // ---- Student ----
@@ -130,6 +141,31 @@ export class CodingController {
     return result;
   }
 
+  /**
+   * Submit by pinning a commit in the student's workspace (§19, §21).
+   *
+   * The Git counterpart of the upload above: same attempt rules, same review
+   * pipeline, but what is recorded is a commit in the student's own repository
+   * rather than a copy of their files.
+   */
+  @Post('assignments/:id/submit-commit')
+  @Roles(Role.STUDENT)
+  async submitCommit(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Body() dto: SubmitCommitDto,
+  ) {
+    const result = await this.submissions.submitCommit(user, id, dto);
+    // Reviews like the archive path now that the reviewer reads the commit
+    // itself — the whole tree on a first attempt, the diff against the previous
+    // one after that (§26). This was held back only while the reviewer would
+    // have seen zero files and still returned a confident score: a review of
+    // nothing that reads like a review of the work (§25). That is no longer
+    // true, so the assignment's own aiAutoReview flag decides again.
+    void this.aiReview.maybeAutoReview(result.submission.id);
+    return result;
+  }
+
   /** Manager re-runs the AI review for a submission. */
   @Post('submissions/:id/review')
   review(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
@@ -142,7 +178,35 @@ export class CodingController {
     return this.submissions.getSubmission(user, id);
   }
 
-  /** One file's text content from the submitted archive (review viewer). */
+  /**
+   * The submitted commit and what changed in it.
+   *
+   * Deliberately its own endpoint rather than part of the detail above: this
+   * one talks to GitHub, and a student polling their own submission should not
+   * have the whole view fail because GitHub is slow. Returns null for an
+   * upload-backed submission, whose files come from the archive instead.
+   */
+  @Get('submissions/:id/commit')
+  submissionCommit(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.submissions.getCommitView(user, id);
+  }
+
+  /**
+   * Whether this reviewer can check the submission out on their own machine.
+   *
+   * Asked before the checkout is attempted: an instructor's access to a
+   * student repository comes from their GitHub organisation role, which
+   * Livetich does not grant and cannot infer from a failed fetch.
+   */
+  @Get('submissions/:id/review-access')
+  submissionReviewAccess(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+  ) {
+    return this.reviewAccess.forSubmission(user, id);
+  }
+
+  /** One file's text content — from the commit, or the archive (review viewer). */
   @Get('submissions/:id/file')
   fileContent(
     @CurrentUser() user: JwtPayload,

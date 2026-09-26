@@ -14,6 +14,7 @@ import type { JwtPayload } from '../auth/jwt-payload';
 import { CoursesService } from '../courses/courses.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CodingLiveService } from './coding-live.service';
+import { forStudent } from './ai-visibility';
 import { CreateCodingAssignmentDto } from './dto/create-coding-assignment.dto';
 import { UpdateCodingAssignmentDto } from './dto/update-coding-assignment.dto';
 
@@ -38,12 +39,19 @@ export class CodingService {
     dto: CreateCodingAssignmentDto,
   ) {
     await this.courses.assertCanManageCourse(user, courseId);
-    if (dto.sessionId) await this.assertSessionInCourse(dto.sessionId, courseId);
+    if (dto.sessionId)
+      await this.assertSessionInCourse(dto.sessionId, courseId);
 
     const kind = dto.kind ?? CodingAssignmentKind.ASSIGNMENT;
-    // A live task with a session launches on create; everything else drafts.
+    // A live task with a session launches on create and is broadcast.
     const launchLive =
       kind === CodingAssignmentKind.LIVE && Boolean(dto.sessionId);
+    // Homework opens on create too. It used to be left DRAFT, which no UI could
+    // then move — drafts are excluded from /coding/mine and submitting to one
+    // is refused, so an assignment set as homework could never reach a student
+    // at all. Only a LIVE task with no session still drafts, because it has no
+    // room to be announced in yet.
+    const open = launchLive || kind === CodingAssignmentKind.ASSIGNMENT;
 
     // A timed live task counts down from launch: its deadline is now + limit.
     // An untimed task (or an assignment) keeps the explicit dueAt if given.
@@ -59,7 +67,7 @@ export class CodingService {
         courseId,
         kind,
         sessionId: dto.sessionId ?? null,
-        status: launchLive
+        status: open
           ? CodingAssignmentStatus.LIVE
           : CodingAssignmentStatus.DRAFT,
         createdById: user.sub,
@@ -68,6 +76,7 @@ export class CodingService {
         language: dto.language ?? null,
         framework: dto.framework ?? null,
         difficulty: dto.difficulty ?? null,
+        workspacePath: dto.workspacePath ?? null,
         dueAt,
         timeLimitSec: dto.timeLimitSec ?? null,
         ...scalarDefaults(dto),
@@ -98,11 +107,7 @@ export class CodingService {
   }
 
   /** Patch scalar fields; replace requirements/rubric wholesale when supplied. */
-  async update(
-    user: JwtPayload,
-    id: string,
-    dto: UpdateCodingAssignmentDto,
-  ) {
+  async update(user: JwtPayload, id: string, dto: UpdateCodingAssignmentDto) {
     await this.getManageable(user, id);
 
     const data: Prisma.CodingAssignmentUpdateInput = {};
@@ -111,7 +116,9 @@ export class CodingService {
     if (dto.language !== undefined) data.language = dto.language;
     if (dto.framework !== undefined) data.framework = dto.framework;
     if (dto.difficulty !== undefined) data.difficulty = dto.difficulty;
-    if (dto.dueAt !== undefined) data.dueAt = dto.dueAt ? new Date(dto.dueAt) : null;
+    if (dto.workspacePath !== undefined) data.workspacePath = dto.workspacePath;
+    if (dto.dueAt !== undefined)
+      data.dueAt = dto.dueAt ? new Date(dto.dueAt) : null;
     if (dto.timeLimitSec !== undefined) data.timeLimitSec = dto.timeLimitSec;
     if (dto.maxAttempts !== undefined) data.maxAttempts = dto.maxAttempts;
     if (dto.allowResubmit !== undefined) data.allowResubmit = dto.allowResubmit;
@@ -196,7 +203,16 @@ export class CodingService {
         },
       },
     });
-    return { ...assignment, mySubmissions };
+    // The instructor sees the machine's opinion first. Until they release it,
+    // the student gets their own attempts and any feedback written for them,
+    // but not the AI's summary, findings, requirement verdicts, or the
+    // provisional score — which is that same verdict as a number.
+    return {
+      ...assignment,
+      mySubmissions: mySubmissions.map((s) =>
+        forStudent(s, assignment.showAiToStudents, true),
+      ),
+    };
   }
 
   /** The signed-in student's coding assignments across enrolled courses, with
@@ -224,6 +240,8 @@ export class CodingService {
             attemptNumber: true,
             status: true,
             finalScore: true,
+            // Redacted below when the assignment has not released AI output:
+            // this is the AI's verdict expressed as a number.
             provisionalScore: true,
           },
         },
@@ -246,7 +264,13 @@ export class CodingService {
       requirementCount: a._count.requirements,
       maxAttempts: a.maxAttempts,
       allowResubmit: a.allowResubmit,
-      latestSubmission: a.submissions[0] ?? null,
+      // This list is the student's own, so the assignment's release setting
+      // applies: without it the sidebar would show the AI's score as a number
+      // while its reasoning was withheld. The manager's list (teaching, below)
+      // is deliberately not redacted — seeing it first is the point.
+      latestSubmission: a.submissions[0]
+        ? forStudent(a.submissions[0], a.showAiToStudents, true)
+        : null,
     }));
   }
 

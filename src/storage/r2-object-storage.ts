@@ -1,9 +1,13 @@
 import {
+  DeleteObjectCommand,
   GetObjectCommand,
+  HeadObjectCommand,
   NoSuchKey,
+  NotFound,
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import type { Readable } from 'node:stream';
 import { ObjectStorage } from './object-storage';
 
@@ -51,6 +55,56 @@ export class R2ObjectStorage implements ObjectStorage {
       if (e instanceof NoSuchKey) return null;
       throw e;
     }
+  }
+
+  async delete(key: string): Promise<void> {
+    await this.client.send(
+      new DeleteObjectCommand({ Bucket: this.config.bucket, Key: key }),
+    );
+  }
+
+  async size(key: string): Promise<number | null> {
+    try {
+      const res = await this.client.send(
+        new HeadObjectCommand({ Bucket: this.config.bucket, Key: key }),
+      );
+      return res.ContentLength ?? null;
+    } catch (e) {
+      if (e instanceof NotFound || e instanceof NoSuchKey) return null;
+      throw e;
+    }
+  }
+
+  /**
+   * A presigned GET, so a recording streams from R2 straight to the browser
+   * rather than through this API. `downloadAs` sets the filename the browser
+   * saves it under, via a response-header override on the signature.
+   */
+  async signedUrl(
+    key: string,
+    opts: { expiresInSeconds?: number; downloadAs?: string } = {},
+  ): Promise<string | null> {
+    const command = new GetObjectCommand({
+      Bucket: this.config.bucket,
+      Key: key,
+      ...(opts.downloadAs
+        ? {
+            ResponseContentDisposition: `attachment; filename="${opts.downloadAs.replace(
+              /"/g,
+              '',
+            )}"`,
+          }
+        : {}),
+    });
+    // The presigner resolves its own copy of the smithy middleware types, so
+    // the compiler sees two structurally identical S3Client types with private
+    // fields and refuses them. It is the same client at runtime; this asserts
+    // that rather than pinning the whole AWS dependency tree to one revision.
+    return getSignedUrl(
+      this.client as unknown as Parameters<typeof getSignedUrl>[0],
+      command as unknown as Parameters<typeof getSignedUrl>[1],
+      { expiresIn: opts.expiresInSeconds ?? 3600 },
+    );
   }
 
   async get(key: string): Promise<Buffer | null> {

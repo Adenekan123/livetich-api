@@ -15,6 +15,26 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AiUsageService } from '../observability/ai-usage.service';
 import { CodingSubmissionsService } from './coding-submissions.service';
 import { CodingLiveService } from './coding-live.service';
+import { ReviewSourceService } from './git/review-source.service';
+
+/**
+ * Render an uploaded archive's files into the same block a commit produces.
+ *
+ * The archive path has no diff to show and no earlier attempt to compare
+ * against, so it is always the whole submission — said plainly, so the model
+ * is never left guessing whether it received everything.
+ */
+function renderArchiveFiles(
+  files: { path: string; content: string }[],
+): string {
+  if (files.length === 0) {
+    return '(no readable source files were found in this submission)';
+  }
+  return (
+    'This is an uploaded archive of the whole submission.\n\nFiles:\n' +
+    files.map((f) => `\n----- FILE: ${f.path} -----\n${f.content}`).join('\n')
+  );
+}
 
 /** Token counts pulled from Gemini's usageMetadata (all optional/defensive). */
 interface GeminiUsage {
@@ -113,10 +133,17 @@ const GEMINI_SCHEMA = {
 };
 
 /**
- * Coding Instructor Plugin — the AI code reviewer (Claude). It is an assistant,
- * never the final authority: it reads the student's code against the assignment
- * requirements + rubric and returns a structured, instructor-overridable verdict.
- * It never executes code and never claims a test ran (there is no test runner).
+ * Coding Instructor Plugin — the AI code reviewer. It is an assistant, never
+ * the final authority: it reads the student's code against the assignment
+ * requirements + rubric and returns a structured, instructor-overridable
+ * verdict. It never executes code and never claims a test ran (there is no
+ * test runner).
+ *
+ * The provider is Google Gemini (see MODEL above), not Anthropic. Saying
+ * otherwise in a comment is not harmless: CODING_AI_MODEL was once set to an
+ * Anthropic model id, which this client sends to Google and Google rejects —
+ * and because a failed review degrades gracefully, it looked like the pipeline
+ * working while reviewing nothing.
  */
 @Injectable()
 export class CodingAiReviewService {
@@ -131,6 +158,7 @@ export class CodingAiReviewService {
     private readonly prisma: PrismaService,
     private readonly courses: CoursesService,
     private readonly submissions: CodingSubmissionsService,
+    private readonly reviewSource: ReviewSourceService,
     private readonly live: CodingLiveService,
     private readonly usage: AiUsageService,
   ) {}
@@ -166,7 +194,7 @@ export class CodingAiReviewService {
     });
   }
 
-  /** Run one review end to end: build context → call Claude → persist. */
+  /** Run one review end to end: build context → call the model → persist. */
   async review(submissionId: string): Promise<void> {
     const submission = await this.prisma.codingSubmission.findUnique({
       where: { id: submissionId },
@@ -205,8 +233,20 @@ export class CodingAiReviewService {
     }
 
     try {
-      const files = await this.submissions.readSubmissionText(submissionId);
-      const { output, usage } = await this.callGemini(assignment, files);
+      // A commit-backed attempt is read from GitHub — the whole tree the first
+      // time, the diff against the previous attempt after that (§26). Anything
+      // else is an uploaded archive, which is read from storage as before.
+      // Falling back rather than branching on a flag means a commit-backed
+      // submission whose repository has become unreachable still gets reviewed
+      // on whatever is available, instead of silently reviewing nothing.
+      const fromCommit =
+        await this.reviewSource.renderForSubmission(submissionId);
+      const source =
+        fromCommit ??
+        renderArchiveFiles(
+          await this.submissions.readSubmissionText(submissionId),
+        );
+      const { output, usage } = await this.callGemini(assignment, source);
       // Meter the call for the admin usage dashboard (best-effort; never throws).
       this.usage.record({
         feature: AiUsageFeature.CODING_REVIEW,
@@ -238,7 +278,8 @@ export class CodingAiReviewService {
       requirements: { id: string; text: string; mandatory: boolean }[];
       rubric: { criterion: string; weight: number; mandatory: boolean; aiInstructions: string | null }[];
     },
-    files: { path: string; content: string }[],
+    /** Already rendered, because how it was assembled changes what it says. */
+    source: string,
   ): Promise<{ output: ReviewOutput; usage: GeminiUsage }> {
     const requirementLines = assignment.requirements
       .map((r) => `- [${r.id}]${r.mandatory ? ' (MANDATORY)' : ''} ${r.text}`)
@@ -251,12 +292,6 @@ export class CodingAiReviewService {
           )
           .join('\n')
       : '(no explicit rubric — weight correctness and requirement coverage)';
-    const code = files.length
-      ? files
-          .map((f) => `\n----- FILE: ${f.path} -----\n${f.content}`)
-          .join('\n')
-      : '(no readable source files were found in the submission)';
-
     const system = [
       'You are an expert programming instructor reviewing a student submission.',
       'You are an assistant to the human instructor, NOT the final authority.',
@@ -275,7 +310,7 @@ export class CodingAiReviewService {
       assignment.description ? `\nDescription:\n${assignment.description}` : '',
       `\nRequirements (id in brackets):\n${requirementLines}`,
       `\nRubric:\n${rubricLines}`,
-      `\nStudent submission files:\n${code}`,
+      `\nStudent submission:\n${source}`,
     ]
       .filter(Boolean)
       .join('\n');

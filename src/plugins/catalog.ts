@@ -21,6 +21,7 @@ export interface PluginDef {
  *  sync with the catalog entries below. */
 export const PLUGIN_ISLAMIC_EDUCATION = 'islamic-education';
 export const PLUGIN_CODE_INSTRUCTION = 'code-instruction';
+export const PLUGIN_MATHS_SCIENCES = 'maths-sciences';
 export const PLUGIN_TEST_PREP = 'test-prep';
 
 export const PLUGIN_CATALOG: readonly PluginDef[] = [
@@ -48,6 +49,20 @@ export const PLUGIN_CATALOG: readonly PluginDef[] = [
       'Live shared code editor as a classroom surface',
       'Syntax highlighting across common languages',
       'Instructor drives; students follow read-only',
+    ],
+    priceMonthly: null,
+  },
+  {
+    key: 'maths-sciences',
+    name: 'Maths & Sciences',
+    summary:
+      'Tools for maths and science instructors — typeset equations on the ' +
+      'chalkboard, from a palette rather than from LaTeX the teacher has to ' +
+      'know by heart.',
+    features: [
+      'Formula palette: fractions, roots, powers, integrals, matrices',
+      'Equations land on the chalkboard properly typeset',
+      'Every formula stays editable, not flattened into a picture',
     ],
     priceMonthly: null,
   },

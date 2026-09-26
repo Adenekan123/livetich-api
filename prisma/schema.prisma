@@ -32,6 +32,18 @@ enum SessionStatus {
   ENDED
 }
 
+enum RecordingStatus {
+  /// Egress requested; LiveKit has not confirmed it yet.
+  STARTING
+  /// Capturing live.
+  RECORDING
+  /// Room closed; LiveKit is still writing the file to R2.
+  PROCESSING
+  /// File in R2, playable.
+  READY
+  FAILED
+}
+
 enum QuizType {
   SECTION
   BUZZER
@@ -77,17 +89,50 @@ model Organization {
   preClassReminder       Boolean @default(false)
   /// Lead time for that reminder, in minutes before the meeting start.
   reminderLeadMinutes    Int     @default(30)
+  /// Recording storage this workspace may use, in bytes. Usage is the sum of
+  /// its recordings; the gallery warns as this is approached and refuses new
+  /// recordings past it.
+  ///
+  /// Defaulted rather than left open. Null still means "no ceiling", but it is
+  /// now something an operator has to choose for a specific customer, instead
+  /// of what every workspace silently got by being created.
+  storageQuotaBytes      BigInt? @default(5368709120) // 5 GB
+
+  /// How long a recording is kept before the nightly sweep removes it, in days.
+  /// Null = kept forever, which is again a deliberate choice rather than the
+  /// default. A quota on its own only postpones the problem: without an expiry
+  /// every workspace grows until it hits the ceiling, and the only way out is
+  /// asking a paying customer to delete their own lessons.
+  recordingRetentionDays Int? @default(365)
+
+  /// Ceiling on a single recording, in minutes. Null = uncapped.
+  ///
+  /// The quota is checked when Record is pressed, but a file's size is not
+  /// known until it has finished uploading — so without this a workspace one
+  /// megabyte under its limit could still start a three-hour lesson and
+  /// overshoot without bound. This is what makes the overshoot finite.
+  maxRecordingMinutes Int? @default(180)
+
+  /// Encoding preset for this workspace's recordings: high, balanced, compact
+  /// or minimal (see RecordingEgressService). Lets a free tier record at half
+  /// the size without touching anyone else.
+  recordingQuality String @default("balanced")
+
   /// Default lifetime for new invite links, in days. Null = links never expire.
   /// Applied at invite-creation time when no explicit expiry is given.
-  inviteLinkExpiryDays   Int?
+  inviteLinkExpiryDays Int?
 
   createdAt DateTime @default(now())
 
-  users       User[]
-  memberships Membership[]
-  courses     Course[]
-  invites     Invite[]
-  orgPlugins  OrgPlugin[]
+  users         User[]
+  memberships   Membership[]
+  courses       Course[]
+  invites       Invite[]
+  orgPlugins    OrgPlugin[]
+  recordings    Recording[]
+  quickAccesses QuickAccess[]
+  tajweedAnnotations TajweedAnnotation[]
+  githubConnection   GitHubOrganizationConnection?
 }
 
 /// An enabled add-on pack for a tenant. The catalog of pluginKeys lives in code
@@ -153,6 +198,19 @@ model User {
   verifyOtpHash      String?
   verifyOtpExpiresAt DateTime?
 
+  // GitHub identity, connected once from the editor (§9). Personal rather than
+  // per-workspace: one person, one GitHub account, however many institutions
+  // they study with. Null until they connect, which is also the answer to
+  // "can this student be given a coding workspace yet".
+  //
+  // Both are unique because repository access is granted by them — two Livetich
+  // accounts claiming one GitHub user would mean a student holding push access
+  // to someone else's work. No token is kept here: the App acts on the
+  // organisation, and the student's own editor authenticates as itself.
+  githubLogin        String?   @unique @db.VarChar(100)
+  githubUserId       String?   @unique @db.VarChar(32)
+  githubConnectedAt  DateTime?
+
   organization             Organization?         @relation(fields: [organizationId], references: [id])
   // Multi-workspace: one identity can hold memberships in many orgs, each with
   // its own role + status. The single organizationId/role/status above are the
@@ -183,6 +241,12 @@ model User {
   codingSubmissions        CodingSubmission[]    @relation("codingStudent")
   codingReviewed           CodingSubmission[]    @relation("codingReviewer")
   codingFeedback           CodingFeedback[]      @relation("codingFeedbackAuthor")
+  codingWorkspaces         CodingEnrollmentWorkspace[] @relation("codingWorkspaceStudent")
+  recordingsStarted        Recording[]
+  quickAccesses            QuickAccess[]
+  tajweedCorrections       TajweedAnnotation[]   @relation("tajweedStudent")
+  tajweedCreated           TajweedAnnotation[]   @relation("tajweedCreator")
+  tajweedUpdated           TajweedAnnotation[]   @relation("tajweedUpdater")
 
   @@index([organizationId])
 }
@@ -223,6 +287,12 @@ model Course {
   title          String
   description    String?  @db.Text
   posterUrl      String?
+  /// Short code used to build infrastructure names — on a program it is the
+  /// subject ("FE"), on a batch the intake ("SEP26"). Together with the
+  /// enrolment number these name a coding student's private repository without
+  /// putting their name in it: names are neither unique nor stable (§6).
+  /// Null until something needs one, so non-coding courses are unaffected.
+  code           String?  @db.VarChar(16)
   createdAt      DateTime @default(now())
 
   // ---- Cohort program (descriptive; live sessions are still scheduled per occurrence) ----
@@ -267,7 +337,30 @@ model Course {
   hifzEntries         HifzEntry[]
   exams               Exam[]
   codingAssignments   CodingAssignment[]
+  recordings          Recording[]
+  tajweedAnnotations  TajweedAnnotation[]
+  /// Set on a *program* (parent course): how its students hand work in, and so
+  /// whether this is a coding program at all. Null = not one.
+  ///
+  /// Deliberately here and not on CodingProgramGitConfig, whose `connectionId`
+  /// is required: a config row cannot exist without a GitHub connection, so
+  /// putting the mode there would force GitHub setup on an upload-only
+  /// workshop — the exact thing UPLOAD exists to avoid.
+  codingSubmissionMode CodingSubmissionMode?
+  /// Set on a *program* (parent course): how its student repositories are made.
+  gitConfig           CodingProgramGitConfig?
+  /// Set on a *batch*: one workspace per enrolled coding student.
+  codingWorkspaces    CodingEnrollmentWorkspace[]
 
+  /// Intake codes are unique within their program, not across the workspace:
+  /// two programs both running a September 2026 cohort is ordinary, and the
+  /// earlier workspace-wide constraint refused the second one.
+  ///
+  /// This does NOT constrain *program* codes, because a program has no parent
+  /// and MySQL treats NULLs as distinct — so two programs could both be "FE"
+  /// as far as the database is concerned, and their repository names would
+  /// then collide. CoursesService enforces that half (see assertCodeAvailable).
+  @@unique([organizationId, parentCourseId, code])
   @@index([instructorId])
   @@index([organizationId])
   @@index([parentCourseId])
@@ -286,6 +379,7 @@ model Section {
   assignments         Assignment[]
   assessmentQuestions AssessmentQuestion[]
   remediationTasks    RemediationTask[]
+  tajweedAnnotations  TajweedAnnotation[]
 
   @@unique([courseId, order])
 }
@@ -374,11 +468,17 @@ model Enrollment {
   createdAt       DateTime  @default(now())
   /// When the student last tapped "Add to calendar" (proxy for reminder set).
   reminderAddedAt DateTime?
+  /// Per-course sequence, allocated on demand (not at enrolment). This is the
+  /// stable half of a coding repository's name — it survives the student
+  /// renaming themselves, and two students called Aisha get different numbers.
+  no              Int?
 
-  course  Course @relation(fields: [courseId], references: [id])
-  student User   @relation(fields: [studentId], references: [id])
+  course    Course                     @relation(fields: [courseId], references: [id])
+  student   User                       @relation(fields: [studentId], references: [id])
+  workspace CodingEnrollmentWorkspace?
 
   @@unique([courseId, studentId])
+  @@unique([courseId, no])
   @@index([studentId])
 }
 
@@ -394,6 +494,7 @@ model LiveSession {
 
   course            Course             @relation(fields: [courseId], references: [id])
   section           Section?           @relation(fields: [sectionId], references: [id])
+  recordings        Recording[]
   messages          ChatMessage[]
   quizzes           Quiz[]
   attendances       Attendance[]
@@ -401,6 +502,7 @@ model LiveSession {
   assignments       Assignment[]
   hifzEntries       HifzEntry[]
   codingAssignments CodingAssignment[]
+  tajweedAnnotations TajweedAnnotation[]
 
   @@index([courseId, status])
 }
@@ -422,6 +524,53 @@ model Attendance {
 /// One row per (course, meeting day) the pre-class reminder cron has emailed —
 /// the dedupe key so a class occurrence is never reminded twice. `dateKey` is
 /// the occurrence's local calendar day in the course tz ("YYYY-MM-DD").
+/**
+ * A recorded class.
+ * The video itself never passes through this API: LiveKit's egress writes it
+ * straight to R2, and the gallery hands out time-limited signed URLs. This row
+ * is the record of where it went and what happened to it.
+ * Scoped to the organization, like courses and sessions — the workspace owns
+ * the storage and its staff share one gallery.
+ */
+model Recording {
+  id             String @id @default(cuid())
+  sessionId      String
+  courseId       String
+  organizationId String
+  /// Who pressed record. Kept even if they later leave the workspace.
+  startedById    String
+
+  status      RecordingStatus @default(STARTING)
+  /// LiveKit's egress id — used to stop it, and to match its webhooks back.
+  egressId    String?         @unique
+  /// R2 object key. Null until LiveKit reports the finished file.
+  storageKey  String?
+  /// Bytes. A two-hour class runs past a 32-bit int, so this is a BigInt.
+  sizeBytes   BigInt?
+  durationSec Int?
+  /// Why it failed, when it did — shown in the gallery rather than swallowed.
+  error       String?
+
+  /// Share link. Null until someone deliberately releases the recording; a
+  /// recorded class holds students' faces and voices, so it stays staff-only
+  /// until then.
+  shareToken     String?   @unique
+  shareExpiresAt DateTime?
+
+  createdAt DateTime  @default(now())
+  readyAt   DateTime?
+
+  session      LiveSession  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  course       Course       @relation(fields: [courseId], references: [id])
+  organization Organization @relation(fields: [organizationId], references: [id])
+  startedBy    User         @relation(fields: [startedById], references: [id])
+
+  @@index([organizationId, createdAt])
+  @@index([sessionId])
+  @@index([courseId])
+  @@index([startedById])
+}
+
 model SessionReminder {
   id       String   @id @default(cuid())
   courseId String
@@ -714,10 +863,146 @@ model HifzEntry {
   student    User         @relation("hifzEntryStudent", fields: [studentId], references: [id])
   recordedBy User         @relation("hifzEntryRecorder", fields: [recordedById], references: [id])
   session    LiveSession? @relation(fields: [sessionId], references: [id])
+  tajweedCorrections TajweedAnnotation[]
 
   @@index([courseId, studentId])
   @@index([studentId])
   @@index([sessionId])
+}
+
+// ===================== Tajweed (Islamic Education pack) =====================
+// Annotations point INTO the canonical Qur'an text (src/quran) by surah, ayah,
+// word position and letter (grapheme) position — they never store a copy of
+// the Arabic, so the text cannot drift from its source. See quran-words.ts.
+
+/// How much of an ayah an annotation covers.
+/// How an annotation is drawn. A colour, when set, overrides the rule's default.
+enum TajweedAnnotationStyle {
+  HIGHLIGHT
+  UNDERLINE
+}
+
+/// LESSON: prepared teaching material, restored whenever its lesson is opened.
+/// STUDENT_CORRECTION: feedback on one student's recitation.
+/// Live, temporary annotations are deliberately not a mode: they are never
+/// stored here, only in the session's Redis state (see RoomStateService).
+enum TajweedAnnotationMode {
+  LESSON
+  STUDENT_CORRECTION
+}
+
+/// What the teacher heard, for a correction.
+enum TajweedOutcome {
+  CORRECT
+  REPEAT
+  TAJWEED_ISSUE
+  PRONUNCIATION
+  NOTE
+}
+
+model TajweedAnnotation {
+  /// Chosen by the client, so a create resent after a dropped connection finds
+  /// the row it already made instead of making a second one.
+  id             String                 @id @db.VarChar(64)
+  organizationId String
+  courseId       String
+  /// The lesson it belongs to. Null for an annotation made in a session that
+  /// has no section, which then belongs to that session.
+  sectionId      String?
+  /// The live session it was made in, if any.
+  sessionId      String?
+  mode           TajweedAnnotationMode
+  /// STUDENT_CORRECTION only.
+  studentId      String?
+  /// The recitation a correction was heard in, when one was logged.
+  hifzEntryId    String?
+  /// The first part's ayah, denormalised for filing and ordering. Where the
+  /// annotation is drawn is decided by its parts, which may span ayahs.
+  surahNumber    Int
+  ayahNumber     Int
+  /// Kept for next time: shown to any class in this course that opens these
+  /// ayahs, instead of only the lesson it was made in.
+  kept           Boolean                @default(false)
+  /// A key of TAJWEED_RULES (src/shared), as "group.rule". A string rather than
+  /// an enum so a new rule needs no migration. Null only for a correction with
+  /// no rule attached.
+  rule           String?                @db.VarChar(48)
+  customLabel    String?                @db.VarChar(60)
+  style          TajweedAnnotationStyle @default(HIGHLIGHT)
+  /// #rrggbb, the teacher's own colour.
+  color          String?                @db.VarChar(7)
+  /// Plain text. Tags are stripped on the way in; it is never rendered as HTML.
+  note           String?                @db.Text
+  outcome        TajweedOutcome?
+  /// Bumped on every edit. An edit based on an older version is refused, so a
+  /// reconnecting client cannot overwrite a newer change.
+  version        Int                    @default(1)
+  createdById    String
+  updatedById    String
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  course       Course       @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  section      Section?     @relation(fields: [sectionId], references: [id], onDelete: SetNull)
+  session      LiveSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  student      User?        @relation("tajweedStudent", fields: [studentId], references: [id])
+  hifzEntry    HifzEntry?   @relation(fields: [hifzEntryId], references: [id], onDelete: SetNull)
+  createdBy    User         @relation("tajweedCreator", fields: [createdById], references: [id])
+  updatedBy    User         @relation("tajweedUpdater", fields: [updatedById], references: [id])
+  parts        TajweedAnnotationPart[]
+
+  @@index([courseId, sectionId])
+  @@index([courseId, studentId])
+  /// Kept marks come back for any class in the course that opens the ayah.
+  @@index([courseId, kept])
+  @@index([sessionId])
+  @@index([organizationId, createdAt])
+}
+
+/// One piece of text an annotation holds: a whole ayah, one word of it, or one
+/// letter of that word. A mark is its parts, and they may sit in different
+/// ayahs — a rule can hold the last letter of one and the first of the next.
+/// Nothing between two parts is implied.
+model TajweedAnnotationPart {
+  id           String @id @default(cuid())
+  annotationId String @db.VarChar(64)
+  /// Reading order within the mark, so it is drawn and read back as picked.
+  position     Int
+  surahNumber  Int
+  ayahNumber   Int
+  /// 0-based word in the ayah; null marks the whole ayah.
+  wordIndex    Int?
+  /// 0-based grapheme cluster in that word; null marks the whole word.
+  letterIndex  Int?
+
+  annotation TajweedAnnotation @relation(fields: [annotationId], references: [id], onDelete: Cascade)
+
+  /// "What is marked on this ayah?" — the question every render asks.
+  @@index([surahNumber, ayahNumber])
+  @@index([annotationId, position])
+}
+
+enum TajweedChange {
+  CREATED
+  UPDATED
+  DELETED
+}
+
+/// Minimal change history. No foreign key to the annotation on purpose: the
+/// history has to outlive a deletion, which is exactly when a student
+/// correction's record matters most.
+model TajweedAnnotationRevision {
+  id           String        @id @default(cuid())
+  annotationId String        @db.VarChar(64)
+  version      Int
+  change       TajweedChange
+  /// The annotation as it stood after this change (as it was, for a deletion).
+  snapshot     Json
+  changedById  String
+  changedAt    DateTime      @default(now())
+
+  @@index([annotationId])
 }
 
 // ===================== Test Prep (add-on pack: test-prep) =====================
@@ -807,7 +1092,8 @@ model AlocQuestionCache {
 /// ============================================================
 /// Coding Instructor Plugin
 /// Rich coding assignments (requirements + weighted rubric), multi-attempt
-/// ZIP submissions, and AI (Claude) code review the instructor always overrides.
+/// submissions — an uploaded ZIP, or a commit in the student's own GitHub
+/// repository — and AI code review (Gemini) the instructor always overrides.
 /// Kept separate from the simpler `Assignment`/`Submission` coursework models.
 /// Excluded by product decision: automated test execution, sandboxing, AI tutor.
 /// ============================================================
@@ -825,6 +1111,25 @@ enum CodingAssignmentKind {
   ASSIGNMENT
 }
 
+/// How a coding program's students hand work in.
+///
+/// GIT is the full experience: a private repository per enrolment, Save and
+/// Submit as buttons, a submission pinned to a commit. It needs a connected
+/// GitHub organisation and, for large projects, starting code.
+///
+/// UPLOAD is a project .zip and nothing else. It exists because the git setup
+/// costs more than a two-hour workshop is worth, and because a school on locked
+/// -down machines may never be able to do it. The review pipeline is unchanged:
+/// a submission's files are read from the archive instead of from a commit.
+///
+/// The distinction is stored rather than inferred from whether a program has a
+/// git config, because "deliberately upload-only" and "half-configured" need to
+/// say different things to a student, and an absent row cannot tell them apart.
+enum CodingSubmissionMode {
+  GIT
+  UPLOAD
+}
+
 /// A submission's place in the review pipeline (no test/sandbox stages).
 enum CodingSubmissionStatus {
   SUBMITTED // received, awaiting review
@@ -834,6 +1139,15 @@ enum CodingSubmissionStatus {
   PASSED
   FAILED
   RETURNED // instructor sent feedback; resubmission allowed
+}
+
+/// What a submission is an attempt at. Homework and in-class exercises are both
+/// CodingAssignment rows (they differ by `kind`); a competition is isolated in
+/// its own repository (§36) but still lands here as an attempt.
+enum CodingActivityType {
+  ASSIGNMENT
+  LIVE_EXERCISE
+  COMPETITION
 }
 
 /// Per-requirement (and final) assessment.
@@ -879,6 +1193,10 @@ model CodingAssignment {
   difficulty       String? // "Beginner" | "Intermediate" | "Advanced"
   /// Same-origin URL of the optional starter project archive in object storage.
   starterFileUrl   String?
+  /// Where this task's work lives inside the student's course repository, e.g.
+  /// "assignments/todo-api" or "live-exercises/lesson-07-navbar" (§18, §20).
+  /// Null = anywhere in the repo; the whole commit is the submission.
+  workspacePath    String?                @db.VarChar(255)
   status           CodingAssignmentStatus @default(DRAFT)
   dueAt            DateTime?
   /// Live practice window in seconds (null = untimed homework).
@@ -938,10 +1256,19 @@ model CodingSubmission {
   assignmentId     String
   studentId        String
   attemptNumber    Int                    @default(1)
+  /// What was submitted. An attempt arrives one of two ways and both are kept:
+  /// an uploaded ZIP (archiveUrl/archiveHash) or a commit in the student's
+  /// course repository (workspaceId/commitSha). Exactly one pair is set.
+  activityType     CodingActivityType     @default(ASSIGNMENT)
   /// Same-origin URL of the immutable stored project archive.
   archiveUrl       String?
   /// Content hash of the archive, so a submission references an exact state.
   archiveHash      String?
+  /// Git path: the workspace this came from, and the exact commit it is pinned
+  /// to. The commit is the source of truth — later pushes never change what
+  /// this attempt was (§22).
+  workspaceId      String?
+  commitSha        String?                @db.VarChar(40)
   status           CodingSubmissionStatus @default(SUBMITTED)
   /// AI-computed provisional score (0–100) before the instructor decides.
   provisionalScore Int?
@@ -955,6 +1282,7 @@ model CodingSubmission {
   assignment CodingAssignment       @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
   student    User                   @relation("codingStudent", fields: [studentId], references: [id])
   reviewedBy User?                  @relation("codingReviewer", fields: [reviewedById], references: [id])
+  workspace  CodingEnrollmentWorkspace? @relation(fields: [workspaceId], references: [id])
   files      CodingSubmissionFile[]
   reviews    CodingAiReview[]
   feedback   CodingFeedback[]
@@ -962,6 +1290,8 @@ model CodingSubmission {
   @@unique([assignmentId, studentId, attemptNumber])
   @@index([assignmentId])
   @@index([studentId])
+  @@index([workspaceId])
+  @@index([commitSha])
 }
 
 model CodingSubmissionFile {
@@ -1104,4 +1434,162 @@ model AiUsage {
   @@index([feature, at])
   @@index([model, at])
   @@index([orgId, at])
+}
+
+// ===========================================================================
+// Coding Instructor — GitHub-backed student workspaces
+//
+// GitHub stores the code; Livetich stores everything about it. The rule that
+// shapes these tables is one enrolment in one coding program = one private
+// repository (§4), owned by the institution's GitHub organisation, reused for
+// every class, exercise and assignment for the life of the program.
+// ===========================================================================
+
+enum GitHubConnectionStatus {
+  ACTIVE
+  /// The installation is still on record but GitHub is refusing it — usually
+  /// suspended by an org owner. Reconnect rather than re-create.
+  SUSPENDED
+  REVOKED
+}
+
+enum CodingWorkspaceStatus {
+  NOT_CREATED
+  PROVISIONING
+  ACTIVE
+  /// Program finished: kept read-only as grading evidence, never deleted (§34).
+  ARCHIVED
+  /// Student left. The repository survives per the retention policy (§35).
+  WITHDRAWN
+  ERROR
+}
+
+/// A tenant's link to its GitHub organisation, via an installation of the
+/// Livetich GitHub App.
+///
+/// No token is stored. Installation tokens last an hour and are minted per
+/// request from the App's private key, which lives in configuration and never
+/// leaves the server (§8, §44). What is kept here is only the identifiers
+/// needed to mint one.
+model GitHubOrganizationConnection {
+  id             String @id @default(cuid())
+  organizationId String @unique
+
+  /// GitHub ids are stored as strings on purpose: they are opaque identifiers,
+  /// never arithmetic, and a BigInt would throw the moment a response is
+  /// serialised to JSON.
+  githubInstallationId    String                 @db.VarChar(32)
+  githubOrganizationId    String?                @db.VarChar(32)
+  githubOrganizationLogin String                 @db.VarChar(100)
+  status                  GitHubConnectionStatus @default(ACTIVE)
+  /// Who connected it, for the audit trail.
+  connectedById String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  organization   Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  programConfigs CodingProgramGitConfig[]
+
+  @@index([githubInstallationId])
+}
+
+/// How one coding *program* (a parent Course) provisions student repositories.
+/// Its presence is what marks a program as coding-enabled.
+model CodingProgramGitConfig {
+  id           String @id @default(cuid())
+  courseId     String @unique
+  connectionId String
+
+  /// Optional template repository the student's repo is seeded from (§12).
+  /// Held by name as well as id so a misconfiguration is legible to a human.
+  templateRepositoryId   String? @db.VarChar(32)
+  templateRepositoryName String? @db.VarChar(100)
+  defaultBranch          String  @default("main") @db.VarChar(100)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  course     Course                       @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  connection GitHubOrganizationConnection @relation(fields: [connectionId], references: [id])
+
+  @@index([connectionId])
+}
+
+/// One student's private repository for one coding program enrolment.
+///
+/// Created lazily — when the student first opens their workspace, not when they
+/// enrol (§10), because many enrolments never start. `enrollmentId` is unique,
+/// which is what makes provisioning idempotent: a second Start can only ever
+/// find the existing row, never make a second repository (§39).
+model CodingEnrollmentWorkspace {
+  id           String @id @default(cuid())
+  enrollmentId String @unique
+  /// The batch (cohort) course the enrolment belongs to. The program, and so
+  /// the git config, is its parentCourseId.
+  courseId     String
+  studentId    String
+
+  githubRepositoryId       String? @db.VarChar(32)
+  githubRepositoryName     String? @db.VarChar(100)
+  githubRepositoryFullName String? @db.VarChar(200)
+  defaultBranch            String  @default("main") @db.VarChar(100)
+
+  status CodingWorkspaceStatus @default(NOT_CREATED)
+  /// Why provisioning failed, shown to no one but kept for support.
+  lastError    String?   @db.Text
+  lastSyncedAt DateTime?
+
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  archivedAt DateTime?
+
+  enrollment  Enrollment         @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  course      Course             @relation(fields: [courseId], references: [id])
+  student     User               @relation("codingWorkspaceStudent", fields: [studentId], references: [id])
+  submissions CodingSubmission[]
+
+  @@index([courseId])
+  @@index([studentId])
+  @@index([status])
+}
+
+/// A student's fast lane back into their workspace.
+///
+/// Not a second way to be authenticated — redeeming one mints exactly the same
+/// session a password login does, so every guard, role check and enrolment rule
+/// downstream is untouched. It only replaces *how* the student proves who they
+/// are on a device they have already used.
+///
+/// The shortcut URL carries `slug`, which is public and identifies nobody by
+/// name. The passcode is what authenticates, and it is stored only as a hash —
+/// a leaked or shared shortcut is inert on its own.
+model QuickAccess {
+  id             String @id @default(cuid())
+  userId         String
+  organizationId String
+
+  /// The public half, and all that appears in the URL. Opaque and rotatable.
+  slug         String @unique
+  /// bcrypt, never the code itself.
+  passcodeHash String
+
+  /// Throttling. A URL is guessable-adjacent by design — it may be shared, or
+  /// sit in someone's browser history — so the code behind it has to survive
+  /// being attacked directly rather than relying on the link staying secret.
+  failedAttempts Int       @default(0)
+  lockedUntil    DateTime?
+
+  /// Set by the student or an admin; a revoked row is kept so the same slug is
+  /// never handed out again.
+  revokedAt  DateTime?
+  lastUsedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  /// One shortcut per student per workspace — the point is a single icon.
+  @@unique([userId, organizationId])
+  @@index([organizationId])
 }

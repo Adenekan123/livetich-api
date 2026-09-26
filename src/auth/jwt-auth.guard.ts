@@ -17,6 +17,14 @@ export const IS_PUBLIC_KEY = 'isPublic';
 /** Marks a route as accessible without a token. */
 export const Public = () => SetMetadata(IS_PUBLIC_KEY, true);
 
+export const ALLOW_RECORDER_KEY = 'allowRecorder';
+/**
+ * Marks the one route a recorder token may reach. Everywhere else a token
+ * carrying the recorder claim is refused outright, so the credential we hand
+ * to a headless browser cannot be replayed as the instructor it names.
+ */
+export const AllowRecorder = () => SetMetadata(ALLOW_RECORDER_KEY, true);
+
 export const ALLOW_UNVERIFIED_KEY = 'allowUnverified';
 /** Marks a route reachable by a logged-in user whose email isn't verified yet
  *  (the verification endpoints themselves, and /auth/me). */
@@ -55,6 +63,14 @@ export class JwtAuthGuard implements CanActivate {
     } catch {
       throw new UnauthorizedException('Invalid or expired token');
     }
+    const allowRecorder = this.reflector.getAllAndOverride<boolean>(
+      ALLOW_RECORDER_KEY,
+      [context.getHandler(), context.getClass()],
+    );
+    if (payload.recorder && !allowRecorder) {
+      throw new UnauthorizedException('Recorder tokens cannot be used here');
+    }
+
     // The token is stateless (7d), so a disabled/deleted account must be
     // rejected here — not just at login — to end any active session. Cached in
     // Redis (invalidated on disable/verify) so this isn't a per-request DB hit.
