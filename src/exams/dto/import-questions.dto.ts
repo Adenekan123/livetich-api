@@ -34,3 +34,14 @@ export class ImportQuestionsDto {
   @Max(40)
   limit?: number;
 }
+
+/** Query for listing the years a subject + exam type can be imported for. */
+export class ImportYearsDto {
+  @IsString()
+  @MaxLength(40)
+  subject!: string;
+
+  @IsString()
+  @MaxLength(20)
+  examType!: string;
+}
