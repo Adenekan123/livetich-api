@@ -63,6 +63,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+    permissions:
+      packages: read
     steps:
       - uses: appleboy/ssh-action@v1
         with:
@@ -72,6 +74,10 @@ jobs:
           command_timeout: 15m
           script: |
             set -e
+            # Log the box in to GHCR with this job's short-lived token only for
+            # the pull, so no long-lived registry credential sits on the server.
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin >/dev/null
+            trap 'docker logout ghcr.io >/dev/null' EXIT
             cd "${{ vars.APP_DIR }}/livetich-api"
             # Keep compose/Caddyfile in step with the image. --ff-only refuses
             # rather than clobbering any hand edits made on the box.

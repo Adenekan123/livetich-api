@@ -13,7 +13,8 @@ Each repo (`livetich-api`, `livetich-web`) has `.github/workflows/deploy.yml`:
    build, since `next build` type-checks.
 2. **build** — builds the Docker image and pushes it to GHCR as
    `ghcr.io/adenekan123/livetich-{api,web}:{staging|prod}` and `:<commit-sha>`.
-3. **deploy** — SSHes to the box as the `deploy` user, pulls the image, restarts
+3. **deploy** — SSHes to the box (as root, with a CI-only key), logs in to GHCR
+   with the job's short-lived token, pulls the image, restarts
    that one service, and waits for its healthcheck. A failing healthcheck fails
    the job (red X in the Actions tab). Production takes a `deploy/backup.sh`
    backup first (api deploys only).
@@ -31,17 +32,22 @@ Re-run a deploy without a new commit: Actions tab → **deploy** → *Run workfl
 
 ## Rolling back
 
-Every build is also tagged with its commit sha. On the box (as `deploy`):
+Preferred: `git revert` the bad commit and push — CI deploys the fix.
+
+To go back to an earlier image straight away, every build is also tagged with
+its commit sha. The box holds no registry login (CI logs in only for the pull),
+so log in first with a token that has `read:packages`:
 
 ```bash
-cd ~/livetich-api
+cd /root/livetich-api
 C="docker compose --env-file deploy/.env.prod -f docker-compose.prod.yml"
+echo <token> | docker login ghcr.io -u Adenekan123 --password-stdin
 docker pull ghcr.io/adenekan123/livetich-api:<good-sha>
-docker tag  ghcr.io/adenekan123/livetich-api:<good-sha> ghcr.io/adenekan123/livetich-api:prod
+docker tag  ghcr.io/adenekan123/livetich-api:<good-sha> ghcr.io/adenekan123/livetich-api:staging   # or :prod
 $C up -d --no-build api        # same for web
+docker logout ghcr.io
 ```
 
-Or `git revert` the bad commit and push — that deploys the fix through CI.
 An image rollback does **not** undo a migration; restore from the pre-deploy
 backup (`deploy/restore.sh`) if the schema change itself was the problem.
 
@@ -51,8 +57,8 @@ backup (`deploy/restore.sh`) if the schema change itself was the problem.
   secrets `SSH_HOST`, `SSH_USER`, `SSH_KEY`; variable `APP_DIR` (parent dir of
   the checkouts); web also has variable `NEXT_PUBLIC_API_URL`.
 - **Each box:** `deploy/.env.prod` sets `DEPLOY_TAG` (`staging` or `prod`), and
-  the `deploy` user is logged in to `ghcr.io` with a read-only (`read:packages`)
-  token.
+  root's `~/.ssh/authorized_keys` holds the `github-actions-deploy@livetich` key.
+  To cut CI off, delete that line.
 
 ## Not automatic
 
