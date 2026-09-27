@@ -154,6 +154,12 @@ export class SessionsService {
       )
       .catch(() => {});
 
+    // Tell everyone still in the room that class is over, whatever the org does
+    // next — the room plays its class-end sound on this.
+    this.broadcaster.emitToSession(ended.id, 'room:ended', {
+      sessionId: ended.id,
+    });
+
     // Evict students to the course page (they don't linger on a dead board).
     if (course?.organization?.evictOnInstructorLeave) {
       this.broadcaster.emitToSession(ended.id, 'room:closed', {
