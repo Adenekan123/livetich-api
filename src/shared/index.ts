@@ -543,6 +543,9 @@ export interface ClientToServerEvents {
 export interface ServerToClientEvents {
   'room:presence': (p: { sessionId: string; users: RoomUser[] }) => void;
 
+  /** The instructor ended the class. Sent to everyone in the room on every
+   *  end, before any `room:closed`, so each client can mark the moment. */
+  'room:ended': (p: { sessionId: string }) => void;
   /** The instructor ended the class and the org evicts students on end — the
    *  student clients leave the room. Reason lets the UI phrase it. */
   'room:closed': (p: { sessionId: string; reason: 'ENDED' }) => void;
