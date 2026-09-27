@@ -57,12 +57,45 @@ audit log — and emails the security alert address.
 Because a super-admin is a skeleton key for the whole platform, `/admin` has four
 defenses on top of normal auth:
 
-### 1. Edge IP allowlist (Caddy)
+### 1. Edge IP allowlist (Caddy) — SSH tunnel only
 `/admin` (dashboard + API) is refused at the proxy for any IP not in
 `ADMIN_ALLOW_IPS` — even a valid operator session can't reach it from elsewhere.
 **Fail-closed:** unset, it defaults to `127.0.0.1/32` (localhost only), so admin
-is unreachable until you set your IP.
+is unreachable until you set it.
 
+**Production allows only the SSH tunnel.** `ADMIN_ALLOW_IPS="172.18.0.1/32"` is
+the compose network's gateway: a request that enters the server through an SSH
+tunnel reaches Caddy from that address, while every request from the internet
+keeps its real IP. So `/admin` is closed to the whole internet, and reaching it
+takes the server's SSH key — no dependence on your home IP, which changes and is
+often shared by many customers of the same ISP.
+
+**Opening the console (Windows):** from this repo, run
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy\admin-console.ps1
+```
+
+It opens the tunnel with `~/.ssh/livetich_admin` (`-Key` for another), starts
+Edge/Chrome in a separate profile with `livetich.nekan.dev` and
+`api.livetich.nekan.dev` routed through it, and closes the tunnel when you close
+that window. Elsewhere, do the same by hand: `ssh -N -L 8443:localhost:443
+root@<server>` and a Chromium browser started with
+`--host-resolver-rules="MAP livetich.nekan.dev 127.0.0.1:8443, MAP api.livetich.nekan.dev 127.0.0.1:8443"`.
+
+Check the gateway after recreating the network (`docker compose down` can give
+it a new subnet — admin then just stays closed until this is updated):
+
+```bash
+docker network inspect livetich_default --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}'
+```
+
+> **Keep the server IPv4-only, or revisit this.** Docker's userland proxy
+> forwards IPv6 connections to published ports from the same gateway address, so
+> if the server gains a public IPv6 address and an AAAA record, IPv6 visitors
+> would pass this check. Today it has neither.
+
+**Alternative — allow your own IP** (weaker; breaks whenever your IP changes).
 Set it in `deploy/.env.prod` (space-separated IPs/CIDRs; include IPv6 if you have
 one), then restart Caddy:
 ```bash
@@ -74,8 +107,9 @@ curl -4 ifconfig.co        # and: curl -6 ifconfig.co
 ADMIN_ALLOW_IPS="41.x.x.x/32 2c0f:xxxx::/48"
 ```
 ```bash
-docker compose --env-file deploy/.env.prod -f docker-compose.prod.yml up -d caddy
+docker compose --env-file deploy/.env.prod -f docker-compose.prod.yml up -d --no-deps caddy
 ```
+(`--no-deps` keeps the api and web containers running; the env file is theirs too.)
 If your ISP gives you a dynamic IP, either use your provider's static-IP option or
 allow your ISP's CIDR block (looser, but still far better than open).
 
