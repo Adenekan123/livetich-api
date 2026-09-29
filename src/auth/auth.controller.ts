@@ -204,6 +204,10 @@ export class AuthController {
     return { ok: true };
   }
 
+  // The web app reads the session on every server render, so this is traffic,
+  // not an attack surface: it needs a valid token already. Under the class's
+  // 20/min cap a few quick clicks 429'd it, and the page crashed.
+  @Throttle({ default: { limit: 120, ttl: 60_000 } })
   @AllowUnverified()
   @Get('me')
   me(@CurrentUser() user: JwtPayload) {
