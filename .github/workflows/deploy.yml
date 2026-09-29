@@ -90,5 +90,9 @@ jobs:
             # --wait blocks until the container's healthcheck (/health) passes,
             # so a broken release fails this job instead of going quiet.
             $C up -d --no-build --wait --wait-timeout 300 api
+            # Caddy's own definition lives in the compose file too (its network
+            # aliases, for one). Compose recreates it only when that changed, so
+            # an ordinary release leaves the edge alone.
+            $C up -d --no-build --no-deps caddy
             docker image prune -f >/dev/null
             echo "Deployed ${{ github.sha }} to ${{ env.ENVIRONMENT }}"

@@ -26,6 +26,16 @@ services:
       # Space-separated IPs/CIDRs allowed to reach /admin. Defaults (in the
       # Caddyfile) to localhost only — set this to your IP(s) to use the console.
       ADMIN_ALLOW_IPS: ${ADMIN_ALLOW_IPS:-127.0.0.1/32}
+    # Inside the stack, the public domains resolve straight to Caddy. Without
+    # this, a container reaching its own site by name hairpins out through the
+    # host and hangs — and the API does exactly that before every recording,
+    # to check the recorder page is being served. That check hung until the
+    # classroom's request timed out, so Record never worked in production.
+    networks:
+      default:
+        aliases:
+          - ${APP_DOMAIN}
+          - ${API_DOMAIN}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
