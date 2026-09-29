@@ -197,6 +197,59 @@ export class OrganizationsService {
     };
   }
 
+  /**
+   * Has this person already taken up a program link? Deliberately blind to
+   * whether the link is still usable: a student who enrolled and later reopens
+   * a link that has since expired or run out of uses is still enrolled, and
+   * should be shown their class rather than "This invite isn't valid". Answers
+   * only for the caller's own account, so it reveals nothing the link does not.
+   */
+  async inviteStanding(
+    userId: string,
+    token: string,
+  ): Promise<{
+    enrolled: boolean;
+    courseId: string | null;
+    organizationId: string | null;
+  }> {
+    const invite = await this.prisma.invite.findUnique({
+      where: { token },
+      select: { courseId: true, organizationId: true },
+    });
+    if (!invite?.courseId) {
+      return { enrolled: false, courseId: null, organizationId: null };
+    }
+    // The school can switch a member off; being enrolled then is not access.
+    const [membership, enrollment] = await Promise.all([
+      this.prisma.membership.findUnique({
+        where: {
+          userId_organizationId: {
+            userId,
+            organizationId: invite.organizationId,
+          },
+        },
+        select: { status: true },
+      }),
+      this.prisma.enrollment.findUnique({
+        where: {
+          courseId_studentId: { courseId: invite.courseId, studentId: userId },
+        },
+        select: { id: true },
+      }),
+    ]);
+    const enrolled =
+      membership?.status === UserStatus.ACTIVE && enrollment !== null;
+    // The school too: the class resolves the caller's role from the workspace
+    // their session is in, so the page may need to switch them into it first.
+    return enrolled
+      ? {
+          enrolled,
+          courseId: invite.courseId,
+          organizationId: invite.organizationId,
+        }
+      : { enrolled, courseId: null, organizationId: null };
+  }
+
   listMembers(orgId: string, role: Role) {
     // Multi-workspace: an org's members are its Memberships, not users whose
     // legacy `organizationId` matches — so a member who joined this workspace on

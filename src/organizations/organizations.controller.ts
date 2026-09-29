@@ -130,4 +130,11 @@ export class InvitesController {
   resolve(@Param('token') token: string) {
     return this.orgs.resolveInvite(token);
   }
+
+  /** Whether the signed-in viewer is already in the program this link enrols
+   *  into — so reopening the link leads to the class, not a second "Enrol". */
+  @Get(':token/standing')
+  standing(@CurrentUser() user: JwtPayload, @Param('token') token: string) {
+    return this.orgs.inviteStanding(user.sub, token);
+  }
 }
