@@ -77,11 +77,11 @@ powershell -ExecutionPolicy Bypass -File deploy\admin-console.ps1
 ```
 
 It opens the tunnel with `~/.ssh/livetich_admin` (`-Key` for another), starts
-Edge/Chrome in a separate profile with `livetich.nekan.dev` and
-`api.livetich.nekan.dev` routed through it, and closes the tunnel when you close
+Edge/Chrome in a separate profile with `livetich.com` and
+`api.livetich.com` routed through it, and closes the tunnel when you close
 that window. Elsewhere, do the same by hand: `ssh -N -L 8443:localhost:443
 root@<server>` and a Chromium browser started with
-`--host-resolver-rules="MAP livetich.nekan.dev 127.0.0.1:8443, MAP api.livetich.nekan.dev 127.0.0.1:8443"`.
+`--host-resolver-rules="MAP livetich.com 127.0.0.1:8443, MAP api.livetich.com 127.0.0.1:8443"`.
 
 Check the gateway after recreating the network (`docker compose down` can give
 it a new subnet — admin then just stays closed until this is updated):
