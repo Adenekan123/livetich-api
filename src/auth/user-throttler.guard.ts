@@ -42,6 +42,10 @@ export class UserOrIpThrottlerGuard extends ThrottlerGuard {
         // Invalid/expired token — fall through to per-IP tracking.
       }
     }
-    return `ip:${(req.ip as string) ?? 'unknown'}`;
+    const cfIp = req.headers?.['cf-connecting-ip'] as string | undefined;
+    const fwd = req.headers?.['x-forwarded-for'] as string | undefined;
+    const fwdIp = typeof fwd === 'string' ? fwd.split(',')[0].trim() : undefined;
+    const ip = cfIp || fwdIp || (req.ip as string) || 'unknown';
+    return `ip:${ip}`;
   }
 }

@@ -1,4 +1,11 @@
-import { IsEmail, IsNotEmpty, IsString, MaxLength, MinLength } from 'class-validator';
+import {
+  IsEmail,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  MaxLength,
+  MinLength,
+} from 'class-validator';
 
 /** Student/instructor registration — always via an organization invite link. */
 export class RegisterDto {
@@ -19,4 +26,9 @@ export class RegisterDto {
   @IsString()
   @IsNotEmpty()
   inviteToken!: string;
+
+  @IsOptional()
+  @IsString()
+  turnstileToken?: string;
 }
+

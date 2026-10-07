@@ -6,6 +6,7 @@ import { MailModule } from '../mail/mail.module';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { QuickAccessService } from './quick-access.service';
+import { TurnstileService } from './turnstile.service';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import { RolesGuard } from './roles.guard';
 
@@ -26,11 +27,12 @@ import { RolesGuard } from './roles.guard';
   providers: [
     AuthService,
     QuickAccessService,
+    TurnstileService,
     // Every route requires a valid JWT unless marked @Public();
     // @Roles(...) further restricts by role.
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
   ],
-  exports: [AuthService, QuickAccessService],
+  exports: [AuthService, QuickAccessService, TurnstileService],
 })
 export class AuthModule {}

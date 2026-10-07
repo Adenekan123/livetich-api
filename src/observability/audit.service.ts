@@ -139,9 +139,12 @@ export class AuditService {
   }
 }
 
-/** Best-effort client IP, honoring a single proxy hop (Caddy sets x-forwarded-for). */
+/** Best-effort client IP, prioritizing Cloudflare CF-Connecting-IP, then x-forwarded-for. */
 export function clientIp(req: Request): string | null {
+  const cf = req.headers['cf-connecting-ip'];
+  if (typeof cf === 'string' && cf.length) return cf.trim();
   const fwd = req.headers['x-forwarded-for'];
   if (typeof fwd === 'string' && fwd.length) return fwd.split(',')[0].trim();
   return req.ip ?? req.socket?.remoteAddress ?? null;
 }
+
