@@ -4,8 +4,8 @@ Staging is a **separate Vultr instance** that mirrors production but tracks the
 `staging` git branch instead of `main`. Its purpose: prove a change works with a
 real build, real migrations, and real TLS **before** it ever reaches live users.
 
-- **Live (prod):** `main` branch → the 1 GB box → `livetich.nekan.dev`
-- **Staging:** `staging` branch → this box → `staging.livetich.nekan.dev`
+- **Live (prod):** `main` branch → the 1 GB box → `livetich.com` (or `app.livetich.com`)
+- **Staging:** `staging` branch → this box → `staging.livetich.com`
 
 Release flow: land changes on `staging` → verify here → merge `staging → main` →
 deploy prod. Nothing reaches `main` until it has run on staging.
@@ -20,13 +20,13 @@ deploy prod. Nothing reaches `main` until it has run on staging.
   in `DEPLOY.md`). Same region (Johannesburg) is fine.
 - Note its public IPv4.
 
-### 2. DNS (at your registrar, for nekan.dev)
+### 2. DNS (at Cloudflare, for livetich.com)
 Add two **A records** pointing at the staging IP:
 
-| Type | Name                  | Value              |
-|------|-----------------------|--------------------|
-| A    | `staging`             | `<staging-ip>`     |
-| A    | `api-staging`         | `<staging-ip>`     |
+| Type | Name                  | Value              | Proxy Status |
+|------|-----------------------|--------------------|--------------|
+| A    | `staging`             | `<staging-ip>`     | Proxied 🟠   |
+| A    | `api-staging`         | `<staging-ip>`     | Proxied 🟠   |
 
 Caddy gets Let's Encrypt certs automatically once these resolve.
 
@@ -77,7 +77,7 @@ docker compose --env-file deploy/.env.staging -f docker-compose.prod.yml ps
 docker compose --env-file deploy/.env.staging -f docker-compose.prod.yml logs -f api
 ```
 
-Then open `https://staging.livetich.nekan.dev` and register a fresh org through
+Then open `https://staging.livetich.com` and register a fresh org through
 the normal signup flow (staging starts with an empty DB — use throwaway data,
 never real user data).
 
