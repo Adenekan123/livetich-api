@@ -157,6 +157,22 @@ export class RoomGateway
       });
     }
 
+    // Packet rate limiter per socket: protects against event loop and Redis flooding (max 60 packets/sec)
+    let packetCount = 0;
+    let windowReset = Date.now();
+    client.use((_packet, next) => {
+      const now = Date.now();
+      if (now - windowReset > 1000) {
+        packetCount = 0;
+        windowReset = now;
+      }
+      packetCount++;
+      if (packetCount > 60) {
+        return; // Drop excess packets silently
+      }
+      return next();
+    });
+
     // Same gate as the HTTP guard: disabled or unverified accounts can't hold a
     // live socket (the token is long-lived, so re-check against current state).
     const account = await this.authCache.getState(user.sub);

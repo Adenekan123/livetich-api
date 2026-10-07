@@ -121,6 +121,22 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
       });
     }
 
+    // Packet rate limiter per socket: protects collaborative chalkboard drawing (max 60 packets/sec)
+    let packetCount = 0;
+    let windowReset = Date.now();
+    client.use((_packet, next) => {
+      const now = Date.now();
+      if (now - windowReset > 1000) {
+        packetCount = 0;
+        windowReset = now;
+      }
+      packetCount++;
+      if (packetCount > 60) {
+        return; // Drop excess packets silently
+      }
+      return next();
+    });
+
     const account = await this.authCache.getState(user.sub);
     if (!account || account.status === UserStatus.DISABLED || !account.emailVerified) {
       client.emit('error', { code: 'FORBIDDEN', message: 'Account not permitted' });
