@@ -1,4 +1,5 @@
 import {
+  IsArray,
   IsEmail,
   IsHexColor,
   IsOptional,
@@ -46,4 +47,10 @@ export class RegisterOrganizationDto {
   @IsString()
   @MaxLength(500)
   logoUrl?: string;
+
+  // ---- Initial plugins enabled during workspace setup ----
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  pluginKeys?: string[];
 }

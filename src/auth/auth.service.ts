@@ -18,6 +18,7 @@ import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { RegisterOrganizationDto } from './dto/register-organization.dto';
 import { JwtPayload } from './jwt-payload';
+import { isValidPluginKey } from '../plugins/catalog';
 
 const BCRYPT_ROUNDS = 12;
 
@@ -195,6 +196,19 @@ export class AuthService {
           status: UserStatus.ACTIVE,
         },
       });
+      // Enable requested plugins right at workspace creation
+      if (dto.pluginKeys && dto.pluginKeys.length > 0) {
+        const validKeys = Array.from(new Set(dto.pluginKeys)).filter(isValidPluginKey);
+        if (validKeys.length > 0) {
+          await tx.orgPlugin.createMany({
+            data: validKeys.map((pluginKey) => ({
+              organizationId: org.id,
+              pluginKey,
+            })),
+            skipDuplicates: true,
+          });
+        }
+      }
       return created;
     });
 

@@ -12,6 +12,7 @@ import { MailService } from '../mail/mail.service';
 import { aggregateStudentStats } from '../performance/student-stats';
 import { buildCourseIcs } from './calendar-ics';
 import { AssignInstructorDto } from './dto/assign-instructor.dto';
+import { RoomBroadcaster } from '../realtime/room-broadcaster';
 import { CreateBatchDto } from './dto/create-batch.dto';
 import { CreateCourseDto } from './dto/create-course.dto';
 import { CreateSectionDto } from './dto/create-section.dto';
@@ -23,6 +24,7 @@ export class CoursesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly mail: MailService,
+    private readonly broadcaster: RoomBroadcaster,
   ) {}
 
   // Schedule fields whose change should re-prompt students to update reminders.
@@ -122,6 +124,7 @@ export class CoursesService {
         meetingTimesByDay: true,
         timezone: true,
         instantClassAssessment: true,
+        pluginKeys: true,
       },
     });
     if (!program || program.organizationId !== orgId) {
@@ -158,6 +161,7 @@ export class CoursesService {
           instructorId: dto.instructorId ?? program.instructorId ?? null,
           title,
           description: program.description,
+          pluginKeys: program.pluginKeys ?? undefined,
           posterUrl: program.posterUrl,
           category: program.category,
           level: program.level,
@@ -407,15 +411,20 @@ export class CoursesService {
 
   /**
    * Company-scoped catalog. Students & admins see every course in their org;
-   * instructors see only the courses assigned to them. Each row carries a
-   * light session summary (live now / next scheduled) for the cohort cards.
+   * instructors see courses assigned to them or courses where they teach a cohort.
+   * Each row carries a session summary (live now / next scheduled) rolling up cohorts.
    */
   async listCatalog(user: JwtPayload) {
     if (!user.organizationId) return [];
     const where: Prisma.CourseWhereInput = {
       organizationId: user.organizationId,
     };
-    if (user.role === Role.INSTRUCTOR) where.instructorId = user.sub;
+    if (user.role === Role.INSTRUCTOR) {
+      where.OR = [
+        { instructorId: user.sub },
+        { batches: { some: { instructorId: user.sub } } },
+      ];
+    }
 
     const courses = await this.prisma.course.findMany({
       where,
@@ -428,24 +437,56 @@ export class CoursesService {
           },
           select: { id: true, status: true, scheduledAt: true },
         },
+        batches: {
+          select: {
+            id: true,
+            title: true,
+            instructorId: true,
+            _count: { select: { enrollments: true } },
+            sessions: {
+              where: {
+                status: { in: [SessionStatus.LIVE, SessionStatus.SCHEDULED] },
+              },
+              select: { id: true, status: true, scheduledAt: true },
+            },
+          },
+        },
       },
       orderBy: { createdAt: 'desc' },
     });
 
-    return courses.map(({ sessions, ...c }) => {
-      const live = sessions.find((s) => s.status === SessionStatus.LIVE);
-      const next = sessions
-        .filter((s) => s.status === SessionStatus.SCHEDULED)
-        .sort((a, b) => +a.scheduledAt - +b.scheduledAt)[0];
+    return courses.map(({ sessions, batches, ...c }) => {
+      const live =
+        sessions.find((s) => s.status === SessionStatus.LIVE) ??
+        batches
+          ?.flatMap((b) => b.sessions)
+          .find((s) => s.status === SessionStatus.LIVE);
+
+      const scheduledSessions = [
+        ...sessions.filter((s) => s.status === SessionStatus.SCHEDULED),
+        ...(batches?.flatMap((b) =>
+          b.sessions.filter((s) => s.status === SessionStatus.SCHEDULED),
+        ) ?? []),
+      ].sort((a, b) => +a.scheduledAt - +b.scheduledAt);
+
+      const next = scheduledSessions[0];
+
+      const batchEnrollments =
+        batches?.reduce((acc, b) => acc + (b._count?.enrollments ?? 0), 0) ?? 0;
+
       return {
         ...c,
+        _count: {
+          ...c._count,
+          enrollments: c._count.enrollments + batchEnrollments,
+        },
         liveSessionId: live?.id ?? null,
         nextSessionAt: next?.scheduledAt ?? null,
       };
     });
   }
 
-  /** Course detail, scoped: same org required; instructors must be assigned. */
+  /** Course detail, scoped: same org required; instructors must be assigned to course or one of its batches. */
   async getCourseFor(user: JwtPayload, id: string) {
     const course = await this.prisma.course.findUnique({
       where: { id },
@@ -461,7 +502,13 @@ export class CoursesService {
       throw new NotFoundException('Course not found');
     }
     if (user.role === Role.INSTRUCTOR && course.instructorId !== user.sub) {
-      throw new ForbiddenException('This course is not assigned to you');
+      const teachesBatch = await this.prisma.course.findFirst({
+        where: { parentCourseId: course.id, instructorId: user.sub },
+        select: { id: true },
+      });
+      if (!teachesBatch) {
+        throw new ForbiddenException('This course is not assigned to you');
+      }
     }
     return course;
   }
@@ -721,6 +768,19 @@ export class CoursesService {
       where: { courseId, studentId },
     });
     if (deleted.count === 0) throw new NotFoundException('Not enrolled');
+
+    // Mid-session security: immediately evict the student from any active or scheduled session
+    const activeSessions = await this.prisma.liveSession.findMany({
+      where: {
+        courseId,
+        status: { in: [SessionStatus.LIVE, SessionStatus.SCHEDULED] },
+      },
+      select: { id: true },
+    });
+    for (const s of activeSessions) {
+      await this.broadcaster.evictUserFromSession(s.id, studentId, 'UNENROLLED');
+    }
+
     return { unenrolled: true };
   }
 
