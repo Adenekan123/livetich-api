@@ -14,6 +14,7 @@ import type { Request } from 'express';
 import { AuditAction, AuditService, clientIp } from '../observability/audit.service';
 import { AuthService } from './auth.service';
 import { QuickAccessService } from './quick-access.service';
+import { TurnstileService } from './turnstile.service';
 import { CurrentUser } from './current-user.decorator';
 import { AdminReauthDto } from './dto/admin-reauth.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
@@ -41,6 +42,7 @@ export class AuthController {
     private readonly auth: AuthService,
     private readonly audit: AuditService,
     private readonly quickAccess: QuickAccessService,
+    private readonly turnstile: TurnstileService,
   ) {}
 
   // ---------- Quick access ----------
@@ -123,7 +125,11 @@ export class AuthController {
 
   @Public()
   @Post('register')
-  register(@Body() dto: RegisterDto) {
+  async register(@Body() dto: RegisterDto, @Req() req: Request) {
+    const token =
+      dto.turnstileToken ||
+      (req.headers['cf-turnstile-response'] as string | undefined);
+    await this.turnstile.validateToken(token, clientIp(req) ?? undefined);
     return this.auth.register(dto);
   }
 
@@ -134,6 +140,10 @@ export class AuthController {
     @Body() dto: RegisterOrganizationDto,
     @Req() req: Request,
   ) {
+    const token =
+      dto.turnstileToken ||
+      (req.headers['cf-turnstile-response'] as string | undefined);
+    await this.turnstile.validateToken(token, clientIp(req) ?? undefined);
     const result = await this.auth.registerOrganization(dto);
     this.audit.record({
       action: AuditAction.ORG_CREATED,
@@ -156,6 +166,10 @@ export class AuthController {
   async login(@Body() dto: LoginDto, @Req() req: Request) {
     const ip = clientIp(req);
     const userAgent = req.headers['user-agent'] ?? null;
+    const token =
+      dto.turnstileToken ||
+      (req.headers['cf-turnstile-response'] as string | undefined);
+    await this.turnstile.validateToken(token, ip ?? undefined);
     try {
       const result = await this.auth.login(dto);
       this.audit.record({
@@ -186,11 +200,16 @@ export class AuthController {
   @HttpCode(200)
   @Post('forgot-password')
   async forgotPassword(@Body() dto: ForgotPasswordDto, @Req() req: Request) {
+    const ip = clientIp(req);
+    const token =
+      dto.turnstileToken ||
+      (req.headers['cf-turnstile-response'] as string | undefined);
+    await this.turnstile.validateToken(token, ip ?? undefined);
     await this.auth.requestPasswordReset(dto.email);
     this.audit.record({
       action: AuditAction.AUTH_PASSWORD_RESET_REQUEST,
       actorEmail: dto.email,
-      ip: clientIp(req),
+      ip,
       userAgent: req.headers['user-agent'] ?? null,
     });
     return { ok: true };

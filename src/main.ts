@@ -9,6 +9,11 @@ async function bootstrap() {
   // parsed object is not enough to verify one.
   const app = await NestFactory.create(AppModule, { rawBody: true });
 
+  // Trust proxy headers (X-Forwarded-For, CF-Connecting-IP, etc.) from reverse
+  // proxies like Caddy and Cloudflare so req.ip and rate limiters reflect real clients.
+  const expressApp = app.getHttpAdapter().getInstance();
+  expressApp.set('trust proxy', true);
+
   // Security headers (HSTS, nosniff, no-framing, …). The API is consumed by the
   // web app on another origin, so resources may be read cross-origin.
   app.use(

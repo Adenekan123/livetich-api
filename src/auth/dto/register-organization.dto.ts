@@ -53,4 +53,8 @@ export class RegisterOrganizationDto {
   @IsArray()
   @IsString({ each: true })
   pluginKeys?: string[];
+
+  @IsOptional()
+  @IsString()
+  turnstileToken?: string;
 }
