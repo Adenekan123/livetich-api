@@ -179,3 +179,14 @@ export function resolveJoinWindow(
 
   return { current, next, joinableNow };
 }
+
+/** Local calendar date key (YYYY-MM-DD) in `tz` for today. */
+export function todayDateKey(tz: string, now: Date = new Date()): string {
+  try {
+    const today = partsInTz(now, tz);
+    return `${today.year}-${pad(today.month)}-${pad(today.day)}`;
+  } catch {
+    const d = new Date(now);
+    return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+  }
+}

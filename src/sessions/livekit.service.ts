@@ -70,4 +70,25 @@ export class LivekitService {
       canPublishData: true,
     });
   }
+
+  /**
+   * Immediately ejects a participant from the WebRTC room (mid-session unenrollment/revocation).
+   */
+  async removeParticipant(room: string, identity: string): Promise<void> {
+    const url = this.config.get<string>('LIVEKIT_URL');
+    const key = this.config.get<string>('LIVEKIT_API_KEY');
+    const secret = this.config.get<string>('LIVEKIT_API_SECRET');
+    if (!url || !key || !secret) return;
+    try {
+      const client = new RoomServiceClient(
+        url.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:'),
+        key,
+        secret,
+      );
+      await client.removeParticipant(room, identity);
+    } catch {
+      // Best-effort if participant is already disconnected
+    }
+  }
 }
+

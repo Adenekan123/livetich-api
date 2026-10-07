@@ -102,4 +102,13 @@ export class CreateCourseDto {
   @IsString()
   @MaxLength(64)
   timezone?: string;
+
+  /**
+   * Specialized add-on pack keys enabled for this program.
+   * e.g. ["code-instruction", "maths-sciences"]
+   */
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  pluginKeys?: string[];
 }

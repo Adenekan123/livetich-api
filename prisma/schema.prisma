@@ -314,6 +314,9 @@ model Course {
   /// Off = it's held until the instructor releases it. Set by the instructor in
   /// the Assessments tool. Inherited by batches at creation (snapshot).
   instantClassAssessment Boolean   @default(true)
+  /// Specialized classroom tools/plugins enabled for this program.
+  /// Stored as a JSON array of string keys, e.g. ["code-instruction", "maths-sciences"].
+  pluginKeys             Json?
 
   organization        Organization?        @relation(fields: [organizationId], references: [id])
   instructor          User?                @relation("instructor", fields: [instructorId], references: [id])
@@ -479,7 +482,8 @@ model Enrollment {
 
   @@unique([courseId, studentId])
   @@unique([courseId, no])
-  @@index([studentId])
+  @@index([studentId, createdAt])
+  @@index([courseId, createdAt])
 }
 
 model LiveSession {
@@ -505,6 +509,8 @@ model LiveSession {
   tajweedAnnotations TajweedAnnotation[]
 
   @@index([courseId, status])
+  @@index([courseId, scheduledAt])
+  @@index([status, scheduledAt])
 }
 
 /// One row per student who joined a live session — the attendance signal.
@@ -518,7 +524,7 @@ model Attendance {
   student User        @relation(fields: [studentId], references: [id])
 
   @@unique([sessionId, studentId])
-  @@index([studentId])
+  @@index([studentId, joinedAt])
 }
 
 /// One row per (course, meeting day) the pre-class reminder cron has emailed —

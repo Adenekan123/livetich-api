@@ -217,7 +217,12 @@ export class RoomGateway
       where: { id: p.sessionId },
       include: {
         course: {
-          select: { id: true, instructorId: true, organizationId: true },
+          select: {
+            id: true,
+            instructorId: true,
+            organizationId: true,
+            pluginKeys: true,
+          },
         },
       },
     });
@@ -299,14 +304,8 @@ export class RoomGateway
       scheme: await this.state.getTheme(p.sessionId),
     });
     // The shared mushaf is an Islamic Education pack surface — only seed/emit
-    // its position for orgs that have the pack on. A plain classroom never
-    // opens the reader (see the matching web + view:change gates).
-    if (
-      await this.plugins.isEnabled(
-        session.course.organizationId,
-        PLUGIN_ISLAMIC_EDUCATION,
-      )
-    ) {
+    // its position for courses that have the pack enabled.
+    if (await this.isPackEnabled(session.course, PLUGIN_ISLAMIC_EDUCATION)) {
       // Open the shared mushaf wherever the class last stopped reciting — seeded
       // once for a fresh room (SETNX-style), so it never overrides the
       // instructor's live page nor re-jumps on a reconnect.
@@ -483,7 +482,7 @@ export class RoomGateway
     if (view === 'quran' || view === 'code') {
       const key =
         view === 'quran' ? PLUGIN_ISLAMIC_EDUCATION : PLUGIN_CODE_INSTRUCTION;
-      if (!(await this.plugins.isEnabled(session.course.organizationId, key))) {
+      if (!(await this.isPackEnabled(session.course, key))) {
         return this.fail(client, 'PLUGIN_DISABLED', 'Add-on not enabled');
       }
     }
@@ -516,14 +515,9 @@ export class RoomGateway
   ) {
     const session = await this.ownedSession(client, p.sessionId);
     if (!session) return;
-    // The mushaf is an Islamic Education surface — reject navigation for orgs
+    // The mushaf is an Islamic Education surface — reject navigation for courses
     // without the pack, even though the UI already hides the control.
-    if (
-      !(await this.plugins.isEnabled(
-        session.course.organizationId,
-        PLUGIN_ISLAMIC_EDUCATION,
-      ))
-    ) {
+    if (!(await this.isPackEnabled(session.course, PLUGIN_ISLAMIC_EDUCATION))) {
       return this.fail(client, 'PLUGIN_DISABLED', 'Add-on not enabled');
     }
     // Clamp to the valid mushaf range; the client picks from the catalog, but
@@ -559,12 +553,7 @@ export class RoomGateway
   ) {
     const session = await this.ownedSession(client, p.sessionId);
     if (!session) return;
-    if (
-      !(await this.plugins.isEnabled(
-        session.course.organizationId,
-        PLUGIN_ISLAMIC_EDUCATION,
-      ))
-    ) {
+    if (!(await this.isPackEnabled(session.course, PLUGIN_ISLAMIC_EDUCATION))) {
       return this.fail(client, 'PLUGIN_DISABLED', 'Add-on not enabled');
     }
     const a = p.annotation;
@@ -1097,7 +1086,13 @@ export class RoomGateway
     const session = await this.prisma.liveSession.findUnique({
       where: { id: sessionId },
       include: {
-        course: { select: { instructorId: true, organizationId: true } },
+        course: {
+          select: {
+            instructorId: true,
+            organizationId: true,
+            pluginKeys: true,
+          },
+        },
       },
     });
     const owns = isInstructor
@@ -1126,5 +1121,19 @@ export class RoomGateway
 
   private fail(client: RoomSocket, code: string, message: string) {
     client.emit('error', { code, message });
+  }
+
+  /**
+   * Check whether a specialized pack is enabled for a given course.
+   * Prefers per-program pluginKeys, falling back to org-level enablement for legacy courses.
+   */
+  private async isPackEnabled(
+    course: { organizationId: string | null; pluginKeys?: unknown },
+    key: string,
+  ): Promise<boolean> {
+    if (Array.isArray(course.pluginKeys)) {
+      return (course.pluginKeys as string[]).includes(key);
+    }
+    return this.plugins.isEnabled(course.organizationId, key);
   }
 }
