@@ -54,6 +54,7 @@ services:
       args:
         # NEXT_PUBLIC_* is baked in at build time — must be the PUBLIC api URL.
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+        NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY: ${NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY}
     restart: unless-stopped
     env_file: deploy/.env.prod
     environment:
