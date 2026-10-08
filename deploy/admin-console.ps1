@@ -73,7 +73,7 @@ try {
   # A profile of its own: the routing flags only take effect in a fresh browser
   # process, and the admin sign-in stays separate from everyday browsing.
   $profileDir = Join-Path $env:LOCALAPPDATA 'livetich-admin-browser'
-  $rules = "MAP livetich.nekan.dev 127.0.0.1:$LocalPort, MAP api.livetich.nekan.dev 127.0.0.1:$LocalPort"
+  $rules = "MAP app.livetich.com 127.0.0.1:$LocalPort, MAP livetich.com 127.0.0.1:$LocalPort, MAP api.livetich.com 127.0.0.1:$LocalPort"
 
   Write-Host 'Tunnel open. Close the admin browser window to disconnect.'
   Start-Process $browser -Wait -ArgumentList @(
@@ -83,7 +83,7 @@ try {
     '--disable-quic',
     '--no-first-run',
     '--new-window',
-    'https://livetich.nekan.dev/admin'
+    'https://livetich.com/admin'
   )
 } finally {
   if (-not $tunnel.HasExited) { Stop-Process -Id $tunnel.Id -Force }

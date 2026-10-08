@@ -10,7 +10,7 @@
  */
 import { io } from 'socket.io-client';
 
-const API = 'http://localhost:3000';
+const API = process.env.API_URL ?? 'http://127.0.0.1:3005';
 const setup = JSON.parse(process.argv[2] ?? process.env.SETUP ?? '{}');
 const results = [];
 const check = (name, ok, detail = '') => {

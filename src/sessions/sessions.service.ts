@@ -13,7 +13,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RoomBroadcaster } from '../realtime/room-broadcaster';
 import { CreateSessionDto } from './dto/create-session.dto';
 import { LivekitService } from './livekit.service';
-import { resolveJoinWindow } from './session-schedule';
+import { resolveJoinWindow, todayDateKey } from './session-schedule';
 
 const COURSE_SCHEDULE_SELECT = {
   id: true,
@@ -187,51 +187,101 @@ export class SessionsService {
     });
     if (!course) throw new NotFoundException('Course not found');
 
-    const window = resolveJoinWindow(course);
-    if (!window.current || !window.joinableNow) {
-      throw new ConflictException('No live session scheduled right now');
-    }
+    let targetCourseId = courseId;
+    let targetCourse = course;
 
-    const isOwner =
-      user.role === Role.INSTRUCTOR && course.instructorId === user.sub;
-    // Admins may resolve any of their org's live sessions to shadow-join them.
-    const isAdmin =
-      user.role === Role.ORG_ADMIN &&
-      course.organizationId === user.organizationId;
-    // A solo-teacher admin can enter as the instructor (teach-mode) — arriving
-    // this way makes the room go live, exactly like the assigned instructor.
-    const goingLiveAsHost = isOwner || (isAdmin && teach);
-    if (user.role === Role.INSTRUCTOR && !isOwner) {
-      throw new ForbiddenException('Not your course');
-    }
+    // Smart Cohort Resolution: If user is not directly enrolled/assigned to the parent program,
+    // check if they are enrolled in or assigned to one of its child cohorts (batches).
     if (user.role === Role.STUDENT) {
       const enrollment = await this.prisma.enrollment.findUnique({
         where: { courseId_studentId: { courseId, studentId: user.sub } },
         select: { id: true },
       });
-      if (!enrollment) throw new ForbiddenException('Not enrolled');
-    } else if (!isOwner && !isAdmin) {
-      throw new ForbiddenException('Not a participant of this session');
+      if (!enrollment) {
+        const batchEnrollment = await this.prisma.enrollment.findFirst({
+          where: {
+            studentId: user.sub,
+            course: { parentCourseId: courseId },
+          },
+          select: { courseId: true, course: { select: COURSE_SCHEDULE_SELECT } },
+        });
+        if (batchEnrollment) {
+          targetCourseId = batchEnrollment.courseId;
+          targetCourse = batchEnrollment.course;
+        } else {
+          throw new ForbiddenException('Not enrolled');
+        }
+      }
+    } else if (user.role === Role.INSTRUCTOR && course.instructorId !== user.sub) {
+      const batchWhereInstructor = await this.prisma.course.findFirst({
+        where: { parentCourseId: courseId, instructorId: user.sub },
+        select: COURSE_SCHEDULE_SELECT,
+      });
+      if (batchWhereInstructor) {
+        targetCourseId = batchWhereInstructor.id;
+        targetCourse = batchWhereInstructor;
+      } else {
+        throw new ForbiddenException('Not your course');
+      }
+    } else if (user.role === Role.ORG_ADMIN) {
+      // If admin connects to parent program and a child batch is currently live,
+      // route them directly to the live child cohort!
+      const activeLiveChild = await this.prisma.liveSession.findFirst({
+        where: {
+          course: { parentCourseId: courseId },
+          status: SessionStatus.LIVE,
+        },
+        select: { courseId: true, course: { select: COURSE_SCHEDULE_SELECT } },
+      });
+      if (activeLiveChild) {
+        targetCourseId = activeLiveChild.courseId;
+        targetCourse = activeLiveChild.course;
+      }
     }
 
-    const room = `course-${courseId}-${window.current.dateKey}`;
-    // Idempotent on the unique room name — the first join today creates the row.
-    const session = await this.prisma.liveSession.upsert({
-      where: { livekitRoom: room },
-      create: {
-        courseId,
-        scheduledAt: window.current.scheduledAt,
-        livekitRoom: room,
-      },
-      update: {},
+    const isOwner =
+      user.role === Role.INSTRUCTOR && targetCourse.instructorId === user.sub;
+    const isAdmin =
+      user.role === Role.ORG_ADMIN &&
+      targetCourse.organizationId === user.organizationId;
+    const goingLiveAsHost = isOwner || (isAdmin && teach);
+
+    // Check if an existing live session is running right now for this course
+    const activeLive = await this.prisma.liveSession.findFirst({
+      where: { courseId: targetCourseId, status: SessionStatus.LIVE },
     });
-    // Ending class isn't terminal for the day: within today's join window (the
-    // guard above guarantees we're inside it) the room stays open, so an
-    // instructor who ended early — or students who drifted off — can re-enter.
-    // Reopen a previously-ended occurrence back to SCHEDULED; the instructor
-    // arriving then flips it LIVE via the branch below.
+
+    const window = resolveJoinWindow(targetCourse);
+    // If not already live, non-hosts are strictly bound to scheduled join windows.
+    // Hosts may launch today's session on demand for rehearsals, setups, or makeup classes.
+    if (!activeLive && !window.joinableNow && !goingLiveAsHost) {
+      throw new ConflictException('No live session scheduled right now');
+    }
+
+    const tz = targetCourse.timezone || 'UTC';
+    const dateKey = window.current?.dateKey ?? todayDateKey(tz);
+    const scheduledAt = window.current?.scheduledAt ?? new Date();
+    const room = activeLive
+      ? activeLive.livekitRoom
+      : `course-${targetCourseId}-${dateKey}`;
+
+    // Idempotent on the unique room name — the first join today creates the row.
+    const session =
+      activeLive ??
+      (await this.prisma.liveSession.upsert({
+        where: { livekitRoom: room },
+        create: {
+          courseId: targetCourseId,
+          scheduledAt,
+          livekitRoom: room,
+        },
+        update: {},
+      }));
+
+    // Ending class isn't terminal for the day: within today's window or when host arrives,
+    // the room stays accessible so an instructor or student can re-enter.
     let status: SessionStatus = session.status;
-    if (status === SessionStatus.ENDED) {
+    if (status === SessionStatus.ENDED && (window.joinableNow || goingLiveAsHost)) {
       await this.prisma.liveSession.update({
         where: { id: session.id },
         data: { status: SessionStatus.SCHEDULED, endedAt: null },
@@ -297,13 +347,46 @@ export class SessionsService {
   async courseSessionStatus(courseId: string) {
     const course = await this.prisma.course.findUnique({
       where: { id: courseId },
-      select: COURSE_SCHEDULE_SELECT,
+      select: {
+        ...COURSE_SCHEDULE_SELECT,
+        parentCourseId: true,
+      },
     });
     if (!course) throw new NotFoundException('Course not found');
 
+    // First check if there is an active LIVE session running right now for this course
+    let activeLive = await this.prisma.liveSession.findFirst({
+      where: { courseId, status: SessionStatus.LIVE },
+      select: { id: true, scheduledAt: true, courseId: true },
+    });
+
+    let activeBatchId: string | null = null;
+    let activeBatchTitle: string | null = null;
+
+    // If not live directly and this is a parent program, check child batches
+    if (!activeLive && !course.parentCourseId) {
+      const childLive = await this.prisma.liveSession.findFirst({
+        where: {
+          course: { parentCourseId: courseId },
+          status: SessionStatus.LIVE,
+        },
+        select: {
+          id: true,
+          scheduledAt: true,
+          courseId: true,
+          course: { select: { title: true } },
+        },
+      });
+      if (childLive) {
+        activeLive = childLive;
+        activeBatchId = childLive.courseId;
+        activeBatchTitle = childLive.course.title;
+      }
+    }
+
     const window = resolveJoinWindow(course);
-    let isLive = false;
-    if (window.current) {
+    let isLive = Boolean(activeLive);
+    if (!isLive && window.current) {
       const room = `course-${courseId}-${window.current.dateKey}`;
       const today = await this.prisma.liveSession.findUnique({
         where: { livekitRoom: room },
@@ -311,10 +394,38 @@ export class SessionsService {
       });
       isLive = today?.status === SessionStatus.LIVE;
     }
+
+    // Determine nextAt: fallback to child batches if parent has no schedule
+    let nextAt =
+      activeLive?.scheduledAt ??
+      (window.current ?? window.next)?.scheduledAt ??
+      null;
+
+    if (!nextAt && !course.parentCourseId) {
+      const nextBatchSession = await this.prisma.liveSession.findFirst({
+        where: {
+          course: { parentCourseId: courseId },
+          status: SessionStatus.SCHEDULED,
+          scheduledAt: { gte: new Date() },
+        },
+        orderBy: { scheduledAt: 'asc' },
+        select: { scheduledAt: true, courseId: true, course: { select: { title: true } } },
+      });
+      if (nextBatchSession) {
+        nextAt = nextBatchSession.scheduledAt;
+        if (!activeBatchId) {
+          activeBatchId = nextBatchSession.courseId;
+          activeBatchTitle = nextBatchSession.course.title;
+        }
+      }
+    }
+
     return {
-      joinableNow: window.joinableNow,
+      joinableNow: isLive || window.joinableNow,
       isLive,
-      nextAt: (window.current ?? window.next)?.scheduledAt ?? null,
+      nextAt,
+      activeBatchId,
+      activeBatchTitle,
     };
   }
 

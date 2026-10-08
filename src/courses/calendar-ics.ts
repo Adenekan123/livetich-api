@@ -47,7 +47,7 @@ export interface IcsCourse extends CourseSchedule {
  */
 export function buildCourseIcs(
   course: IcsCourse,
-  host = 'livetich.nekan.dev',
+  host = 'livetich.com',
 ): string | null {
   const occ = listOccurrences(course);
   if (occ.length === 0 || !course.meetingTime || !course.timezone) return null;

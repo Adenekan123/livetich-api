@@ -45,4 +45,55 @@ export class RoomBroadcaster {
       payload,
     );
   }
+
+  /**
+   * Disconnects a specific user's socket connections from a live session.
+   * Sends room:closed with an eviction reason and terminates the connection.
+   */
+  async evictUserFromSession(
+    sessionId: string,
+    userId: string,
+    reason = 'ACCESS_REVOKED',
+  ): Promise<void> {
+    if (!this.server) return;
+    try {
+      const sockets = await this.server.in(sessionId).fetchSockets();
+      for (const socket of sockets) {
+        if ((socket.data as { user?: { sub?: string } })?.user?.sub === userId) {
+          (socket.emit as (e: string, p: unknown) => void)('room:closed', {
+            sessionId,
+            reason,
+          });
+          socket.leave(sessionId);
+          socket.disconnect(true);
+        }
+      }
+    } catch {
+      // Best-effort
+    }
+  }
+
+  /**
+   * Disconnects a user across all active sessions (e.g. account disabled or revoked).
+   */
+  async evictUserGlobally(
+    userId: string,
+    reason = 'ACCOUNT_DISABLED',
+  ): Promise<void> {
+    if (!this.server) return;
+    try {
+      const sockets = await this.server.fetchSockets();
+      for (const socket of sockets) {
+        if ((socket.data as { user?: { sub?: string } })?.user?.sub === userId) {
+          (socket.emit as (e: string, p: unknown) => void)('error', {
+            code: 'FORBIDDEN',
+            message: reason,
+          });
+          socket.disconnect(true);
+        }
+      }
+    } catch {
+      // Best-effort
+    }
+  }
 }
