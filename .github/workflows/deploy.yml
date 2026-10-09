@@ -94,5 +94,6 @@ jobs:
             # aliases, for one). Compose recreates it only when that changed, so
             # an ordinary release leaves the edge alone.
             $C up -d --no-build --no-deps caddy
+            $C exec -T caddy caddy reload --config /etc/caddy/Caddyfile || true
             docker image prune -f >/dev/null
             echo "Deployed ${{ github.sha }} to ${{ env.ENVIRONMENT }}"
