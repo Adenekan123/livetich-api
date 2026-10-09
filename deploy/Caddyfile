@@ -57,3 +57,8 @@
 	}
 }
 
+# Legacy domain redirect (pilot domain -> official domain)
+livetich.nekan.dev {
+	redir https://livetich.com{uri} permanent
+}
+
