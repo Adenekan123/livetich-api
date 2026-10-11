@@ -20,13 +20,30 @@ async function bootstrap() {
     helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }),
   );
 
-  // CORS must be pinned in production — never reflect an arbitrary origin while
-  // sending credentials. Dev falls back to reflecting the request origin.
+  // CORS must be pinned in production — allow configured origin as well as
+  // official livetich.com origins and legacy aliases.
   const webOrigin = process.env.WEB_ORIGIN;
-  if (process.env.NODE_ENV === 'production' && !webOrigin) {
-    throw new Error('WEB_ORIGIN must be set in production');
-  }
-  app.enableCors({ origin: webOrigin ?? true, credentials: true });
+  app.enableCors({
+    origin: (
+      origin: string | undefined,
+      callback: (err: Error | null, allow?: boolean | string) => void,
+    ) => {
+      if (!origin || process.env.NODE_ENV !== 'production') {
+        return callback(null, true);
+      }
+      if (
+        origin === webOrigin ||
+        origin === 'https://livetich.com' ||
+        origin === 'https://app.livetich.com' ||
+        origin === 'https://livetich.nekan.dev' ||
+        /^https:\/\/([a-z0-9-]+\.)?livetich\.com$/i.test(origin)
+      ) {
+        return callback(null, origin);
+      }
+      callback(new Error(`Origin ${origin} not allowed by CORS`));
+    },
+    credentials: true,
+  });
 
   app.useGlobalPipes(
     new ValidationPipe({

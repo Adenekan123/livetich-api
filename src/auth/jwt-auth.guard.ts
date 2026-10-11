@@ -85,7 +85,7 @@ export class JwtAuthGuard implements CanActivate {
       ALLOW_UNVERIFIED_KEY,
       [context.getHandler(), context.getClass()],
     );
-    if (!account.emailVerified && !allowUnverified) {
+    if (!account.emailVerified && !allowUnverified && !payload.recorder) {
       throw new ForbiddenException('Email not verified');
     }
 
