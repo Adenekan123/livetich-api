@@ -550,6 +550,9 @@ export interface ServerToClientEvents {
    *  student clients leave the room. Reason lets the UI phrase it. */
   'room:closed': (p: { sessionId: string; reason: 'ENDED' }) => void;
 
+  /** A recording started or stopped in this class. Broadcast so all clients play the tone. */
+  'recording:status': (p: { sessionId: string; recording: boolean }) => void;
+
   'chat:message': (p: ChatMessage) => void;
   /** Recent messages, sent once to the joining client. */
   'chat:history': (p: { sessionId: string; messages: ChatMessage[] }) => void;

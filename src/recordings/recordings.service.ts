@@ -23,6 +23,7 @@ import {
 } from '../plugins/catalog';
 import { RecorderTokenService } from './recorder-token.service';
 import { RecordingEgressService } from './recording-egress.service';
+import { RoomBroadcaster } from '../realtime/room-broadcaster';
 
 /** Signed playback links are short-lived; the gallery re-asks when it needs one. */
 const PLAYBACK_URL_TTL_SECONDS = 60 * 60;
@@ -54,6 +55,7 @@ export class RecordingsService {
     private readonly config: ConfigService,
     private readonly recorderTokens: RecorderTokenService,
     private readonly roomState: RoomStateService,
+    private readonly broadcaster: RoomBroadcaster,
     @Inject(OBJECT_STORAGE) private readonly storage: ObjectStorage,
   ) {}
 
@@ -372,10 +374,15 @@ export class RecordingsService {
         recorderUrl,
         quality: org?.recordingQuality,
       });
-      return this.prisma.recording.update({
+      const updated = await this.prisma.recording.update({
         where: { id: recording.id },
         data: { egressId, storageKey, status: RecordingStatus.RECORDING },
       });
+      this.broadcaster.emitToSession(sessionId, 'recording:status', {
+        sessionId,
+        recording: true,
+      });
+      return updated;
     } catch (e) {
       // Leave the failure visible rather than deleting the row — an instructor
       // who pressed record deserves to know it did not take.
@@ -402,10 +409,15 @@ export class RecordingsService {
     });
     if (!recording) throw new NotFoundException('Nothing is recording');
     if (recording.egressId) await this.egress.stop(recording.egressId);
-    return this.prisma.recording.update({
+    const updated = await this.prisma.recording.update({
       where: { id: recording.id },
       data: { status: RecordingStatus.PROCESSING },
     });
+    this.broadcaster.emitToSession(sessionId, 'recording:status', {
+      sessionId,
+      recording: false,
+    });
+    return updated;
   }
 
   /** What the classroom shows on the Record button. */
