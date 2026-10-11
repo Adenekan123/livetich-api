@@ -85,10 +85,23 @@ export async function renderCertificatePdf(
     doc
       .fontSize(9)
       .fillColor('#666666')
-      .text(`Scan the QR code or visit ${data.verifyUrl} to verify`, 60, h - 60, {
+      .text(`Scan the QR code or visit ${data.verifyUrl} to verify`, 60, h - 65, {
         width: w - 120,
         align: 'center',
       });
+
+    doc
+      .fontSize(7.5)
+      .fillColor('#888888')
+      .text(
+        'This certificate confirms completion of an independent course syllabus on livetich and does not convey accredited university degree credit.',
+        60,
+        h - 50,
+        {
+          width: w - 120,
+          align: 'center',
+        },
+      );
 
     doc.end();
   });
