@@ -153,7 +153,25 @@ export class RecordingsService {
   private async publicUrl(
     key: 'WEB_URL' | 'API_PUBLIC_URL',
   ): Promise<string | null> {
-    const raw = this.config.get<string>(key)?.replace(/\/+$/, '');
+    let raw = this.config.get<string>(key)?.replace(/\/+$/, '');
+    if (!raw && key === 'API_PUBLIC_URL') {
+      const fallback =
+        this.config.get<string>('API_PUBLIC_URL') ||
+        this.config.get<string>('API_URL') ||
+        this.config.get<string>('NEXT_PUBLIC_API_URL') ||
+        (this.config.get<string>('API_DOMAIN')
+          ? `https://${this.config.get<string>('API_DOMAIN')}`
+          : '');
+      if (fallback) raw = fallback.replace(/\/+$/, '');
+    }
+    if (!raw && key === 'WEB_URL') {
+      const fallback =
+        this.config.get<string>('WEB_ORIGIN') ||
+        (this.config.get<string>('APP_DOMAIN')
+          ? `https://${this.config.get<string>('APP_DOMAIN')}`
+          : '');
+      if (fallback) raw = fallback.replace(/\/+$/, '');
+    }
     if (!raw) return null;
     if (/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(raw)) {
       this.logger.warn(
@@ -194,6 +212,10 @@ export class RecordingsService {
           `${RECORDER_PROBE_TIMEOUT_MS}ms (${e instanceof Error ? e.message : e}) — ` +
           `LiveKit cannot film a page it cannot load.`,
       );
+      // In production, if raw is a valid public https URL, allow it rather than failing if internal container probe is blocked
+      if (raw.startsWith('https://') && !/localhost|127\.0\.0\.1/i.test(raw)) {
+        return raw;
+      }
       return null;
     }
   }
