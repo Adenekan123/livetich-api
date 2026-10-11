@@ -161,7 +161,7 @@ export class RecordingsService {
         this.config.get<string>('NEXT_PUBLIC_API_URL') ||
         (this.config.get<string>('API_DOMAIN')
           ? `https://${this.config.get<string>('API_DOMAIN')}`
-          : '');
+          : 'https://api.livetich.com');
       if (fallback) raw = fallback.replace(/\/+$/, '');
     }
     if (!raw && key === 'WEB_URL') {
@@ -169,8 +169,20 @@ export class RecordingsService {
         this.config.get<string>('WEB_ORIGIN') ||
         (this.config.get<string>('APP_DOMAIN')
           ? `https://${this.config.get<string>('APP_DOMAIN')}`
-          : '');
+          : 'https://livetich.com');
       if (fallback) raw = fallback.replace(/\/+$/, '');
+    }
+    if (raw) {
+      // Normalize app.livetich.com -> livetich.com (app subdomain has no DNS record)
+      if (key === 'WEB_URL' && raw.includes('app.livetich.com')) {
+        raw = raw.replace('app.livetich.com', 'livetich.com');
+      }
+      if (key === 'API_PUBLIC_URL' && raw.includes('app.livetich.com')) {
+        raw = raw.replace('app.livetich.com', 'api.livetich.com');
+      }
+      if (raw.includes('livetich.nekan.dev')) {
+        raw = key === 'API_PUBLIC_URL' ? 'https://api.livetich.com' : 'https://livetich.com';
+      }
     }
     if (!raw) return null;
     if (/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(raw)) {
