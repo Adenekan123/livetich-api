@@ -1,109 +1,113 @@
-# Duckly-Like Live Collaboration: Architecture & Implementation Status
+# Duckly-Like Live Collaboration: Complete Architecture & Implementation Status
 
 ## Overview
-This document specifies and tracks the implementation of Duckly-like pair-programming, multi-file code sharing, terminal streaming, and localhost port-forwarding for the Livetich ecosystem.
+This document specifies the end-to-end implementation of Duckly-like pair-programming, multi-file code sharing, interactive terminal streaming, and localhost port-forwarding across the Livetich platform:
+- **Backend**: `livetich-api` (NestJS on Vultr Ubuntu 2 vCPUs, 4GB RAM)
+- **Host IDE Extension**: `livetich-vscode` (Supporting Google Antigravity IDE and Visual Studio Code)
+- **Web Classroom**: `livetich-web` (Next.js 16 / React 19 / CodeMirror / xterm.js)
 
 ---
 
-## 1. What Has Been Done (Backend Gateway & Protocol in `livetich-api`)
+## 1. Backend Gateway & Protocol (`livetich-api`)
 
-Branch: `feat/live-share-terminal-proxy`
+Branch: `feat/live-share-terminal-proxy` (commit `32b9bb1`)
 
-### A. Shared Protocol Contracts (`src/shared/index.ts`)
-1. **Multi-File Code Sharing**:
-   - `CodeWritePermissionMode`: `'INSTRUCTOR_ONLY' | 'OPEN' | 'DELEGATED'`
-   - `CodeFileTreeNode`: Recursive directory and file tree structure metadata.
-   - `CodeFocusPayload`: Active focused file and cursor coordinate broadcasting for follow-the-instructor mode.
-   - `CodePermissionPayload`: Real-time permission state synchronization.
-   - Socket events: `code:join`, `code:leave`, `code:update`, `code:awareness`, `code:tree`, `code:focus`, `code:permission`.
+### A. Real-time Multi-File Code Sharing (`/code`)
+- **Contracts (`src/shared/index.ts`)**:
+  - `CodeFileTreeNode`: Recursive directory and file metadata structure.
+  - `CodeFocusPayload`: Active focused file and cursor coordinate broadcasting for follow-the-instructor mode.
+  - `CodePermissionPayload`: Live permissions (`INSTRUCTOR_ONLY`, `OPEN`, `DELEGATED`).
+- **`CodeDocService` & `CodeGateway` (`src/code/`)**:
+  - Manages session Yjs docs, workspace trees, and active cursor focus.
+  - Gated write validation via `canWrite(sessionId, user)`.
+  - Memory-efficient: Yjs documents are flushed to object storage and evicted from memory when all session participants disconnect.
 
-2. **Terminal Streaming**:
-   - `TerminalSessionInfo`: Terminal metadata (id, name, cols, rows, interactive, writableBy, delegatedUserIds).
-   - Socket events:
-     - Host: `term:open`, `term:data`, `term:resize`, `term:permission`, `term:close`.
-     - Viewer / Student: `term:join`, `term:leave`, `term:stdin`.
-     - Server relays: `term:opened`, `term:data`, `term:resize`, `term:permission`, `term:stdin` (relayed with `fromUserId`), `term:closed`, `term:state` (with screen backlog).
+### B. Terminal Streaming (`/terminal`)
+- **`TerminalService` & `TerminalGateway` (`src/terminal/`)**:
+  - **Memory Bounded**: Circular ring buffer backlog capped at 64KB per terminal (preventing heap growth).
+  - Streams raw ANSI chunks via `term:data`.
+  - Handles terminal resize geometry via `term:resize`.
+  - Enforces keystroke execution permissions via `term:stdin` with sender identity validation.
+  - Automatic teardown and cleanup when sockets disconnect.
+  - Unit tests verified in `terminal.service.spec.ts`.
 
-3. **Localhost Port Forwarding**:
-   - `ForwardedPortInfo`: Port number, label, targetUrl, registration timestamp.
-   - Socket events:
-     - Host: `tunnel:register`, `tunnel:unregister`, `tunnel:response:headers`, `tunnel:response:chunk`, `tunnel:response:end`, `tunnel:response:error`.
-     - Viewer: `tunnel:join`, `tunnel:leave`, `tunnel:ports`.
-     - Server: `tunnel:request`, `tunnel:abort`.
-
-### B. Multi-File & Permissions in `CodeDocService` & `CodeGateway` (`src/code/`)
-- Upgraded `CodeDocService` to store workspace tree, active focus, and live co-edit permission modes.
-- Added strict write-permission enforcement on `code:update`:
-  - Instructors and Org Admins always have write access.
-  - In `OPEN` mode, enrolled students can write.
-  - In `DELEGATED` mode, only students in `delegatedUserIds` can write.
-  - Otherwise, students are blocked with `FORBIDDEN`.
-- Automatic memory reclamation: when the last client leaves a session, Yjs documents are persisted to object storage and evicted from RAM.
-
-### C. Terminal Streaming Module (`src/terminal/`)
-- Created `TerminalService`:
-  - In-memory ring buffer backlog capped at 64KB per terminal (zero risk of unbounded heap growth on 2 vCPU / 4GB RAM).
-  - Terminal creation, resizing, and permission delegation.
-  - Automatic cleanup when host sockets disconnect.
-- Created `TerminalGateway`:
-  - WebSocket gateway on `/terminal` namespace.
-  - Authenticates via JWT and enforces course enrollment/session validity.
-  - Broadcasts ANSI chunks and routes interactive `term:stdin` keystrokes.
-- Created `TerminalModule` and registered it in `AppModule`.
-- Verified with unit tests in `terminal.service.spec.ts`.
-
-### D. Localhost Port-Forwarding Tunnel & Reverse Proxy (`src/tunnel/`)
-- Created `TunnelService`:
-  - Manages active forwarded port mappings per session.
-  - Manages request lifecycle (chunk streaming, backpressure, 30s timeout).
-  - Sanitizes hop-by-hop headers and strips `x-frame-options`/`frame-ancestors` to allow embedding in web classroom preview iframes.
-- Created `TunnelGateway`:
-  - WebSocket gateway on `/tunnel` namespace.
-  - Receives `tunnel:register` from VS Code host extension.
-  - Dispatches `tunnel:request` to host and routes response chunks back to HTTP clients.
-- Created `ProxyController`:
-  - Handles `/proxy/:sessionId/:port/*` routes.
-  - Authenticates via query parameter `?token=...`, Authorization header, or cookie.
-  - Sets an HTTP-only session cookie so downstream subresources (CSS, JS, images, fetch requests) work automatically.
-  - Renders dark-themed fallback UI if host has not forwarded the requested port.
-- Created `TunnelModule` and registered it in `AppModule`.
-- Verified with unit tests in `tunnel.service.spec.ts`.
+### C. Localhost Port Forwarding Tunnel & Reverse Proxy (`/tunnel` & `/proxy`)
+- **`TunnelService` & `TunnelGateway` (`src/tunnel/`)**:
+  - Host registers local ports (`tunnel:register` -> `{ sessionId, port, label }`).
+  - Broadcasts active port list to room (`tunnel:ports`).
+  - Relays incoming HTTP requests to host extension via `tunnel:request` and streams response chunks back.
+- **`ProxyController` (`/proxy/:sessionId/:port/*`)**:
+  - Pure streaming proxy using `res.write()` and backpressure handling. Zero in-memory buffering of large bundles or images.
+  - Strips restrictive `X-Frame-Options` and `frame-ancestors` so previews embed cleanly inside web classroom iframes.
+  - Sets an HTTP-only session cookie so downstream subresources (CSS, JS, images, fetch requests) work automatically without needing token parameters.
+  - Fallback dark-mode status page if an unforwarded port is accessed.
+  - Unit tests verified in `tunnel.service.spec.ts`.
 
 ---
 
-## 2. Current Status & Build Verification
-- Branch: `feat/live-share-terminal-proxy`
-- `nest build` completed successfully with code `0`.
-- All types and contracts are verified and ready.
+## 2. Host Engine in Extension (`livetich-vscode`)
+
+Branch: `feat/live-share-terminal-proxy` (commit `6db5cb7`)
+
+### Google Antigravity IDE & Visual Studio Code Support
+- Built to run seamlessly on both **Google Antigravity IDE** and **Visual Studio Code**:
+  - Uses standard, robust Node and VS Code Extension APIs with zero vendor lock-in.
+  - Deep-link support for both schemes:
+    - `antigravity://UsmanAdenekan.livetich/join?sessionId=<id>`
+    - `vscode://UsmanAdenekan.livetich/join?sessionId=<id>`
+  - Handles protocol dispatch via `LivetichUriHandler`.
+
+### Implemented Modules (`src/liveshare/`)
+1. **`tunnel-client.ts` (`TunnelClientManager`)**:
+   - Connects to `/tunnel` namespace.
+   - Forwards local ports (e.g. 3000, 5173, 8080).
+   - Receives `tunnel:request` from students and issues local `http.request({ host: '127.0.0.1', port })`.
+   - Streams status headers and binary base64 chunks back to backend.
+   - Handles client aborts.
+2. **`terminal-stream.ts` (`TerminalStreamManager`)**:
+   - Spawns interactive shared pseudoterminal using real host shell (`powershell.exe`/`cmd.exe` on Windows, `bash`/`zsh` on Unix).
+   - Streams ANSI output chunks over `/terminal` socket via `term:data`.
+   - Receives `term:stdin` keystrokes from permitted students and pipes them to the shell process.
+3. **`code-sync.ts` (`CodeSyncManager`)**:
+   - Scans project file tree excluding ignored directories (`.git`, `node_modules`, `dist`, `out`, `.vscode`, `build`).
+   - Broadcasts project tree (`code:tree`).
+   - Follow-the-instructor mode: broadcasts active editor focus and cursor coordinates (`code:focus`).
+   - Synchronizes multi-file Yjs documents bi-directionally.
+4. **`live-session.ts` (`LiveSessionController`)**:
+   - Manages connection lifecycle and displays dedicated status bar item:
+     - `🔴 Live Share :3000`
+   - QuickPick Menu actions:
+     - Forward Localhost Port...
+     - Open Shared Terminal...
+     - Collaboration Permissions (Instructor Only vs Open to All)...
+     - Copy Antigravity IDE Join Link
+     - Copy VS Code Join Link
+     - Stop Live Sharing
 
 ---
 
-## 3. What is Left to be Done
+## 3. Web Classroom Live Studio (`livetich-web`)
 
-### Phase 2: VS Code Extension Host Engine (`livetich-vscode`)
-1. **Live Share Provider (`src/liveshare/code-share.ts`)**:
-   - Connect to `/code` namespace with session ID.
-   - Scan workspace files (filtering `.git`, `node_modules`, `dist`).
-   - Emit `code:tree`.
-   - Sync active text documents via Yjs updates.
-   - Broadcast active editor focus on `window.onDidChangeActiveTextEditor`.
-2. **Terminal Streamer (`src/liveshare/terminal-stream.ts`)**:
-   - Create or hook into host terminal via `vscode.window.onDidWriteTerminalData` or pseudoterminal.
-   - Stream ANSI chunks over `/terminal` namespace via `term:data`.
-   - Listen for `term:stdin` from students and pipe to host terminal.
-3. **Localhost Tunnel Client (`src/liveshare/tunnel-client.ts`)**:
-   - Detect or let host specify active local ports (e.g. 3000, 5173).
-   - Connect to `/tunnel` namespace and register ports.
-   - On `tunnel:request`, perform local `http.request({ host: '127.0.0.1', port, ... })` and stream response chunks back via `tunnel:response:*`.
+Branch: `feat/minimalist-live-session`
 
-### Phase 3: Web Classroom UI Integration (`livetich-web`)
-1. **Multi-File Code IDE**:
-   - Update `code-board.tsx` to include file tree drawer and tab bar matching `minimal-session-prototype.html`.
-   - Follow host cursor focus mode.
-2. **Embedded Terminal**:
-   - Integrate `@xterm/xterm` (xterm.js) and `@xterm/addon-fit` inside live session code panel.
-   - Connect to `/terminal` socket and render ANSI stream.
-   - Add permission toggle button for instructor to grant/revoke student terminal input.
-3. **Live App Preview Dock**:
-   - Embedded iframe pointing to `/proxy/:sessionId/:port/?token=...`.
-   - Address bar, reload button, and viewport presets (Desktop, Tablet, Mobile).
+### Implemented Components (`src/app/sessions/[id]/`)
+1. **`terminal-view.tsx` (`TerminalView`)**:
+   - Powered by `@xterm/xterm` (xterm.js) and `@xterm/addon-fit`.
+   - Connects to `${API_URL}/terminal`.
+   - Replays initial terminal backlog on connect and streams live ANSI chunks.
+   - Interactive typing support: relays student keystrokes via `term:stdin` when unlocked.
+   - Responsive auto-fit on window or drawer resizing.
+2. **`port-preview-view.tsx` (`PortPreviewView`)**:
+   - Connects to `${API_URL}/tunnel`.
+   - Port selector tabs (e.g. `:3000 Next.js App`, `:5173 Vite`).
+   - Multi-device viewport toggles: Desktop (100%), Tablet (768px), Mobile (390px).
+   - Address bar, reload button, and external window popout.
+   - Embedded sandboxed iframe loading `${API_URL}/proxy/${sessionId}/${activePort}/`.
+3. **`code-board.tsx` (`CodeBoard`)**:
+   - Upgraded from simple single scratchpad into a complete Duckly-like live studio:
+     - **File Tree Sidebar**: Collapsible tree displaying the host's actual workspace structure.
+     - **Multi-Tab File Bar**: Switch between open project files with active highlights and close buttons.
+     - **Surface Switcher**: Toggle between **Editor**, **Terminal**, and **Web Preview**.
+     - **Collapsible Bottom Split Terminal**: Keep the terminal visible right below the code editor.
+     - **Live Presence & Follow Mode**: Displays instructor cursor position (`Ln X, Col Y`) and co-editing status badge (`Instructor Only` vs `Co-Edit Open`).
+     - **Antigravity Launcher**: Direct button to launch and open the session inside Google Antigravity IDE.
