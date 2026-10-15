@@ -83,6 +83,9 @@ Branch: `feat/live-share-terminal-proxy` (commit `6db5cb7`)
      - Copy Antigravity IDE Join Link
      - Copy VS Code Join Link
      - Stop Live Sharing
+5. **`live-share-view.ts` (`LiveShareViewProvider`)**:
+   - Dedicated visual Sidebar Panel in the Livetich activity bar (`Live Collaboration`).
+   - Displays real-time session badge, active forwarded ports list with stop buttons, terminal status, co-editing mode selectors, and 1-click deep link copy buttons.
 
 ---
 
