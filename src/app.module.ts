@@ -31,6 +31,8 @@ import { PointsModule } from './points/points.module';
 import { CertificatesModule } from './certificates/certificates.module';
 import { BoardModule } from './board/board.module';
 import { CodeModule } from './code/code.module';
+import { TerminalModule } from './terminal/terminal.module';
+import { TunnelModule } from './tunnel/tunnel.module';
 import { RealtimeModule } from './realtime/realtime.module';
 import { ObservabilityModule } from './observability/observability.module';
 import { AdminModule } from './admin/admin.module';
@@ -85,6 +87,8 @@ import { RecordingsModule } from './recordings/recordings.module';
     CertificatesModule,
     BoardModule,
     CodeModule,
+    TerminalModule,
+    TunnelModule,
     RealtimeModule,
     ObservabilityModule,
     AdminModule,
