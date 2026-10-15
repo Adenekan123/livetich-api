@@ -19,6 +19,9 @@ import { PluginsService } from '../plugins/plugins.service';
 import type {
   BoardBinary,
   CodeClientToServerEvents,
+  CodeFileTreeNode,
+  CodeFocusPayload,
+  CodePermissionPayload,
   CodeServerToClientEvents,
 } from '../shared';
 import { CodeDocService } from './code-doc.service';
@@ -26,8 +29,6 @@ import { CodeDocService } from './code-doc.service';
 interface SocketData {
   user: JwtPayload;
   sessionIds: Set<string>;
-  /** Resolves once the account gate has run (see RoomGateway). code:join awaits
-   *  this so a message racing the async check can't slip past. */
   authReady: Promise<boolean>;
 }
 
@@ -45,12 +46,10 @@ type CodeSocket = Socket<
 >;
 
 /**
- * Yjs shared-code-editor sync — the Code Instruction pack's classroom surface.
- * Mirrors {@link BoardGateway} exactly (separate namespace so binary doc
- * traffic stays off the main room socket; instructor is the only writer),
- * with one addition: code:join also gates on the org having the pack enabled.
+ * Yjs shared-code-editor & multi-file live collaboration gateway (Duckly-like).
+ * Synchronizes collaborative multi-file Yjs documents, active workspace trees,
+ * cursor focus for follow-mode, and permission controls across the classroom.
  */
-// See RoomGateway: the HTTP ThrottlerGuard 500s on socket messages, so skip it.
 @SkipThrottle()
 @WebSocketGateway({ namespace: '/code', cors: { origin: true } })
 export class CodeGateway implements OnGatewayConnection, OnGatewayDisconnect {
@@ -66,8 +65,6 @@ export class CodeGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ) {}
 
   async handleConnection(client: CodeSocket) {
-    // See RoomGateway: verify synchronously (identity ready before the first
-    // await) and stash the account-gate promise so code:join can await it.
     client.data.authReady = this.authenticate(client).catch(() => {
       client.disconnect(true);
       return false;
@@ -90,7 +87,6 @@ export class CodeGateway implements OnGatewayConnection, OnGatewayDisconnect {
     client.data.user = user;
     client.data.sessionIds = new Set();
 
-    // Packet rate limiter per socket: protects collaborative code editing (max 60 packets/sec)
     let packetCount = 0;
     let windowReset = Date.now();
     client.use((_packet, next) => {
@@ -100,7 +96,7 @@ export class CodeGateway implements OnGatewayConnection, OnGatewayDisconnect {
         windowReset = now;
       }
       packetCount++;
-      if (packetCount > 60) {
+      if (packetCount > 100) {
         return; // Drop excess packets silently
       }
       return next();
@@ -141,7 +137,7 @@ export class CodeGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (!session || session.status === SessionStatus.ENDED) {
       return this.fail(client, 'NOT_JOINABLE', 'Session not found or ended');
     }
-    // The code surface only exists for orgs with the Code Instruction pack.
+
     if (
       !(await this.plugins.isEnabled(
         session.course.organizationId,
@@ -150,13 +146,12 @@ export class CodeGateway implements OnGatewayConnection, OnGatewayDisconnect {
     ) {
       return this.fail(client, 'FORBIDDEN', 'Code Instruction is not enabled');
     }
+
     if (user.role === Role.INSTRUCTOR) {
       if (session.course.instructorId !== user.sub) {
         return this.fail(client, 'FORBIDDEN', 'Not your session');
       }
     } else {
-      // Enrolled students may attach to a scheduled session (read-only) and
-      // stay synced when it goes live — see RoomGateway.onJoin.
       const enrolled = await this.prisma.enrollment.findUnique({
         where: {
           courseId_studentId: {
@@ -173,12 +168,25 @@ export class CodeGateway implements OnGatewayConnection, OnGatewayDisconnect {
     await client.join(p.sessionId);
     client.data.sessionIds.add(p.sessionId);
 
+    // Send initial state snapshots to the joining client
     const state = this.docs.encodeState(p.sessionId);
     if (state) {
       client.emit('code:state', {
         sessionId: p.sessionId,
         update: Buffer.from(state),
       });
+    }
+
+    client.emit('code:permission', this.docs.getPermission(p.sessionId));
+
+    const tree = this.docs.getTree(p.sessionId);
+    if (tree) {
+      client.emit('code:tree', { sessionId: p.sessionId, tree });
+    }
+
+    const focus = this.docs.getFocus(p.sessionId);
+    if (focus) {
+      client.emit('code:focus', focus);
     }
   }
 
@@ -198,9 +206,8 @@ export class CodeGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() p: { sessionId: string; update: BoardBinary },
   ) {
     if (!this.inRoom(client, p.sessionId)) return;
-    // Join already proved ownership for instructors, so role alone gates writes.
-    if (client.data.user.role !== Role.INSTRUCTOR) {
-      return this.fail(client, 'FORBIDDEN', 'The code editor is read-only');
+    if (!this.docs.canWrite(p.sessionId, client.data.user)) {
+      return this.fail(client, 'FORBIDDEN', 'The code editor is currently read-only for you');
     }
     const update = this.toBytes(p.update);
     if (!update?.length) return;
@@ -225,6 +232,43 @@ export class CodeGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
   }
 
+  @SubscribeMessage('code:tree')
+  onTree(
+    @ConnectedSocket() client: CodeSocket,
+    @MessageBody() p: { sessionId: string; tree: CodeFileTreeNode[] },
+  ) {
+    if (!this.inRoom(client, p.sessionId)) return;
+    if (!this.docs.canWrite(p.sessionId, client.data.user)) {
+      return this.fail(client, 'FORBIDDEN', 'Unauthorized to modify workspace tree');
+    }
+    this.docs.setTree(p.sessionId, p.tree);
+    client.to(p.sessionId).emit('code:tree', p);
+  }
+
+  @SubscribeMessage('code:focus')
+  onFocus(
+    @ConnectedSocket() client: CodeSocket,
+    @MessageBody() p: CodeFocusPayload,
+  ) {
+    if (!this.inRoom(client, p.sessionId)) return;
+    this.docs.setFocus(p.sessionId, p);
+    client.to(p.sessionId).emit('code:focus', p);
+  }
+
+  @SubscribeMessage('code:permission')
+  onPermission(
+    @ConnectedSocket() client: CodeSocket,
+    @MessageBody() p: CodePermissionPayload,
+  ) {
+    if (!this.inRoom(client, p.sessionId)) return;
+    const user = client.data.user;
+    if (user.role !== Role.INSTRUCTOR && user.role !== Role.ORG_ADMIN) {
+      return this.fail(client, 'FORBIDDEN', 'Only instructors can change editing permissions');
+    }
+    this.docs.setPermission(p.sessionId, p);
+    this.server.to(p.sessionId).emit('code:permission', p);
+  }
+
   private toBytes(data: BoardBinary): Uint8Array | null {
     if (data instanceof Uint8Array) return data;
     if (data instanceof ArrayBuffer) return new Uint8Array(data);
@@ -241,3 +285,4 @@ export class CodeGateway implements OnGatewayConnection, OnGatewayDisconnect {
     client.emit('error', { code, message });
   }
 }
+

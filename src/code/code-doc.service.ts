@@ -3,23 +3,31 @@ import * as Y from 'yjs';
 import { OBJECT_STORAGE } from '../storage/object-storage';
 import type { ObjectStorage } from '../storage/object-storage';
 
+import { Role } from '@prisma/client';
+import type { JwtPayload } from '../auth/jwt-payload';
+import type {
+  CodeFileTreeNode,
+  CodeFocusPayload,
+  CodePermissionPayload,
+} from '../shared';
+
 interface CodeEntry {
   doc: Y.Doc;
   dirty: boolean;
   clients: number;
+  permission: CodePermissionPayload;
+  tree?: CodeFileTreeNode[];
+  focus?: CodeFocusPayload;
 }
 
 const codeKey = (sessionId: string) => `codeboards/${sessionId}.bin`;
 
 /**
- * Server-side Yjs document per session for the shared code editor — the exact
- * same model as {@link BoardDocService}, just a different object-storage key.
- * The doc holds a Y.Text (the buffer) and a Y.Map (the language); both persist
- * in the one snapshot. Docs live in memory while clients are connected and are
- * flushed to storage every FLUSH_MS and when the last client leaves.
- *
- * Doc authority is per-process: fine while writes are instructor-only (the
- * gateway rejects student writes). Revisit (y-redis) if that changes.
+ * Server-side Yjs document per session for the shared code editor.
+ * Manages Yjs buffers, active workspace file trees, follow cursor focus,
+ * and live co-editing permissions (Duckly-like multi-file pairing).
+ * Docs live in memory while clients are connected and are flushed to storage
+ * every FLUSH_MS and automatically evicted when the last client leaves.
  */
 @Injectable()
 export class CodeDocService implements OnModuleDestroy {
@@ -48,7 +56,7 @@ export class CodeDocService implements OnModuleDestroy {
     return entry.doc;
   }
 
-  /** Count a client out; the last one flushes and evicts the doc. */
+  /** Count a client out; the last one flushes and evicts the doc and state. */
   async release(sessionId: string): Promise<void> {
     const entry = this.docsBySession.get(sessionId);
     if (!entry) return;
@@ -72,6 +80,57 @@ export class CodeDocService implements OnModuleDestroy {
     return entry ? Y.encodeStateAsUpdate(entry.doc) : null;
   }
 
+  setPermission(sessionId: string, payload: CodePermissionPayload): void {
+    const entry = this.docsBySession.get(sessionId);
+    if (!entry) return;
+    entry.permission = payload;
+  }
+
+  getPermission(sessionId: string): CodePermissionPayload {
+    const entry = this.docsBySession.get(sessionId);
+    return (
+      entry?.permission ?? {
+        sessionId,
+        mode: 'INSTRUCTOR_ONLY',
+      }
+    );
+  }
+
+  canWrite(sessionId: string, user: JwtPayload): boolean {
+    if (user.role === Role.INSTRUCTOR || user.role === Role.ORG_ADMIN) {
+      return true;
+    }
+    const entry = this.docsBySession.get(sessionId);
+    if (!entry) return false;
+    const mode = entry.permission.mode;
+    if (mode === 'OPEN') return true;
+    if (mode === 'DELEGATED') {
+      return Boolean(entry.permission.delegatedUserIds?.includes(user.sub));
+    }
+    return false;
+  }
+
+  setTree(sessionId: string, tree: CodeFileTreeNode[]): void {
+    const entry = this.docsBySession.get(sessionId);
+    if (!entry) return;
+    entry.tree = tree;
+  }
+
+  getTree(sessionId: string): CodeFileTreeNode[] | undefined {
+    return this.docsBySession.get(sessionId)?.tree;
+  }
+
+  setFocus(sessionId: string, focus: CodeFocusPayload): void {
+    const entry = this.docsBySession.get(sessionId);
+    if (!entry) return;
+    entry.focus = focus;
+  }
+
+  getFocus(sessionId: string): CodeFocusPayload | undefined {
+    return this.docsBySession.get(sessionId)?.focus;
+  }
+
+
   async onModuleDestroy() {
     clearInterval(this.flushTimer);
     await this.flushDirty();
@@ -85,7 +144,12 @@ export class CodeDocService implements OnModuleDestroy {
         const doc = new Y.Doc();
         const snapshot = await this.storage.get(codeKey(sessionId));
         if (snapshot) Y.applyUpdate(doc, snapshot);
-        const entry: CodeEntry = { doc, dirty: false, clients: 0 };
+        const entry: CodeEntry = {
+          doc,
+          dirty: false,
+          clients: 0,
+          permission: { sessionId, mode: 'INSTRUCTOR_ONLY' },
+        };
         this.docsBySession.set(sessionId, entry);
         return entry;
       })().finally(() => this.loading.delete(sessionId));

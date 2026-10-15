@@ -716,19 +716,48 @@ export interface BoardServerToClientEvents {
   error: (p: { code: string; message: string }) => void;
 }
 
+// ---------- Shared Code, Terminal Streaming & Port Forwarding (Live Collaboration) ----------
+
+export type CodeWritePermissionMode = 'INSTRUCTOR_ONLY' | 'OPEN' | 'DELEGATED';
+
+export interface CodeFileTreeNode {
+  path: string;
+  name: string;
+  isDirectory: boolean;
+  size?: number;
+  children?: CodeFileTreeNode[];
+}
+
+export interface CodeFocusPayload {
+  sessionId: string;
+  path: string;
+  cursor?: { line: number; ch: number };
+}
+
+export interface CodePermissionPayload {
+  sessionId: string;
+  mode: CodeWritePermissionMode;
+  delegatedUserIds?: string[];
+}
+
 /**
- * Shared code editor (Code Instruction pack) — its own `/code` namespace, same
- * Yjs-over-socket shape as the chalkboard: a Y.Text (the buffer) plus a Y.Map
- * holding the language, so both persist and replay in one doc. Instructor
- * writes; students follow read-only.
+ * Shared code editor (Code Instruction pack) — `/code` namespace.
+ * Backed by Yjs over socket: holds file buffers, workspace tree, active focus,
+ * and collaborative editing permission states.
  */
 export interface CodeClientToServerEvents {
   'code:join': (p: { sessionId: string }) => void;
   'code:leave': (p: { sessionId: string }) => void;
-  /** Instructor-only: incremental Yjs document update. */
+  /** Incremental Yjs document update (gated by permission mode). */
   'code:update': (p: { sessionId: string; update: BoardBinary }) => void;
   /** Cursor/selection presence — relayed to the room, never persisted. */
   'code:awareness': (p: { sessionId: string; update: BoardBinary }) => void;
+  /** Host broadcasts project workspace file tree structure. */
+  'code:tree': (p: { sessionId: string; tree: CodeFileTreeNode[] }) => void;
+  /** Host broadcasts active file focus and cursor position for follow-mode. */
+  'code:focus': (p: CodeFocusPayload) => void;
+  /** Instructor manages collaborative editing permission mode. */
+  'code:permission': (p: CodePermissionPayload) => void;
 }
 
 export interface CodeServerToClientEvents {
@@ -736,6 +765,136 @@ export interface CodeServerToClientEvents {
   'code:state': (p: { sessionId: string; update: BoardBinary }) => void;
   'code:update': (p: { sessionId: string; update: BoardBinary }) => void;
   'code:awareness': (p: { sessionId: string; update: BoardBinary }) => void;
+  'code:tree': (p: { sessionId: string; tree: CodeFileTreeNode[] }) => void;
+  'code:focus': (p: CodeFocusPayload) => void;
+  'code:permission': (p: CodePermissionPayload) => void;
 
   error: (p: { code: string; message: string }) => void;
 }
+
+// ---------- Terminal Streaming (`/terminal` namespace) ----------
+
+export type TerminalWritableMode = 'INSTRUCTOR_ONLY' | 'OPEN' | 'DELEGATED';
+
+export interface TerminalSessionInfo {
+  terminalId: string;
+  name: string;
+  cols: number;
+  rows: number;
+  interactive: boolean;
+  writableBy: TerminalWritableMode;
+  delegatedUserIds?: string[];
+}
+
+export interface TerminalClientToServerEvents {
+  'term:join': (p: { sessionId: string }) => void;
+  'term:leave': (p: { sessionId: string }) => void;
+
+  // Host operations:
+  'term:open': (p: { sessionId: string; terminal: TerminalSessionInfo }) => void;
+  'term:close': (p: { sessionId: string; terminalId: string }) => void;
+  'term:data': (p: {
+    sessionId: string;
+    terminalId: string;
+    data: string | Uint8Array;
+  }) => void;
+  'term:resize': (p: {
+    sessionId: string;
+    terminalId: string;
+    cols: number;
+    rows: number;
+  }) => void;
+  'term:permission': (p: {
+    sessionId: string;
+    terminalId: string;
+    writableBy: TerminalWritableMode;
+    delegatedUserIds?: string[];
+  }) => void;
+
+  // Interactive client operations:
+  'term:stdin': (p: { sessionId: string; terminalId: string; data: string }) => void;
+}
+
+export interface TerminalServerToClientEvents {
+  'term:opened': (p: { sessionId: string; terminal: TerminalSessionInfo }) => void;
+  'term:closed': (p: { sessionId: string; terminalId: string }) => void;
+  'term:state': (p: {
+    sessionId: string;
+    terminals: Array<TerminalSessionInfo & { backlog?: string }>;
+  }) => void;
+  'term:data': (p: {
+    sessionId: string;
+    terminalId: string;
+    data: string | Uint8Array;
+  }) => void;
+  'term:resize': (p: {
+    sessionId: string;
+    terminalId: string;
+    cols: number;
+    rows: number;
+  }) => void;
+  'term:permission': (p: {
+    sessionId: string;
+    terminalId: string;
+    writableBy: TerminalWritableMode;
+    delegatedUserIds?: string[];
+  }) => void;
+  'term:stdin': (p: {
+    sessionId: string;
+    terminalId: string;
+    data: string;
+    fromUserId: string;
+  }) => void;
+
+  error: (p: { code: string; message: string }) => void;
+}
+
+// ---------- Localhost Port Forwarding Tunnel (`/tunnel` namespace) ----------
+
+export interface ForwardedPortInfo {
+  port: number;
+  label?: string;
+  targetUrl?: string;
+  registeredAt: string;
+}
+
+export interface TunnelClientToServerEvents {
+  'tunnel:register': (p: { sessionId: string; port: number; label?: string }) => void;
+  'tunnel:unregister': (p: { sessionId: string; port: number }) => void;
+
+  'tunnel:response:headers': (p: {
+    reqId: string;
+    statusCode: number;
+    headers: Record<string, string | string[]>;
+  }) => void;
+  'tunnel:response:chunk': (p: {
+    reqId: string;
+    chunk: string;
+    isBase64?: boolean;
+  }) => void;
+  'tunnel:response:end': (p: { reqId: string }) => void;
+  'tunnel:response:error': (p: { reqId: string; message: string }) => void;
+
+  'tunnel:join': (p: { sessionId: string }) => void;
+  'tunnel:leave': (p: { sessionId: string }) => void;
+}
+
+export interface TunnelServerToClientEvents {
+  'tunnel:ports': (p: { sessionId: string; ports: ForwardedPortInfo[] }) => void;
+
+  'tunnel:request': (p: {
+    reqId: string;
+    port: number;
+    method: string;
+    path: string;
+    query: Record<string, string | string[]>;
+    headers: Record<string, string | string[]>;
+    body?: string;
+    isBase64?: boolean;
+  }) => void;
+
+  'tunnel:abort': (p: { reqId: string }) => void;
+
+  error: (p: { code: string; message: string }) => void;
+}
+
