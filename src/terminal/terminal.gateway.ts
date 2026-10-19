@@ -151,8 +151,20 @@ export class TerminalGateway
       return this.fail(client, 'FORBIDDEN', 'Code Instruction is not enabled');
     }
 
-    if (user.role === Role.INSTRUCTOR) {
-      if (session.course.instructorId !== user.sub) {
+    const isAdmin =
+      user.role === Role.ORG_ADMIN || (user.role as string) === 'SUPER_ADMIN';
+    if (isAdmin) {
+      if (
+        session.course.organizationId !== user.organizationId &&
+        (user.role as string) !== 'SUPER_ADMIN'
+      ) {
+        return this.fail(client, 'FORBIDDEN', 'Not your organization');
+      }
+    } else if (user.role === Role.INSTRUCTOR) {
+      if (
+        session.course.instructorId !== user.sub &&
+        session.course.organizationId !== user.organizationId
+      ) {
         return this.fail(client, 'FORBIDDEN', 'Not your session');
       }
     } else {

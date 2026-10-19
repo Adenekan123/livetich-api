@@ -27,7 +27,7 @@ export class DocumentsService {
     private readonly courses: CoursesService,
     private readonly gemini: GeminiService,
     @Inject(OBJECT_STORAGE) private readonly storage: ObjectStorage,
-  ) {}
+  ) { }
 
   async upload(
     user: JwtPayload,
@@ -151,4 +151,5 @@ export class DocumentsService {
     }
     throw new BadRequestException('Upload a PDF or Word (.docx) file');
   }
+
 }

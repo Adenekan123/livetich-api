@@ -42,7 +42,7 @@ export const QUOTA_WARNING_RATIO = 0.85;
  * on the first request, and refusing that would be a worse bug than the silent
  * fallback this replaces.
  */
-const RECORDER_PROBE_TIMEOUT_MS = 15_000;
+const RECORDER_PROBE_TIMEOUT_MS = 3_000;
 
 @Injectable()
 export class RecordingsService {

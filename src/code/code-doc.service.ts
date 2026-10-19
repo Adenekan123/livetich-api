@@ -18,6 +18,7 @@ interface CodeEntry {
   permission: CodePermissionPayload;
   tree?: CodeFileTreeNode[];
   focus?: CodeFocusPayload;
+  expandedFolders?: string[];
 }
 
 const codeKey = (sessionId: string) => `codeboards/${sessionId}.bin`;
@@ -100,14 +101,27 @@ export class CodeDocService implements OnModuleDestroy {
     if (user.role === Role.INSTRUCTOR || user.role === Role.ORG_ADMIN) {
       return true;
     }
-    const entry = this.docsBySession.get(sessionId);
-    if (!entry) return false;
-    const mode = entry.permission.mode;
-    if (mode === 'OPEN') return true;
-    if (mode === 'DELEGATED') {
-      return Boolean(entry.permission.delegatedUserIds?.includes(user.sub));
+    const perm = this.getPermission(sessionId);
+    if (perm.mode === 'OPEN') {
+      return true;
+    }
+    if (perm.mode === 'DELEGATED' && perm.delegatedUserIds?.includes(user.sub)) {
+      return true;
     }
     return false;
+  }
+
+  setFileContent(sessionId: string, path: string, content: string): void {
+    const entry = this.docsBySession.get(sessionId);
+    if (!entry) return;
+    const yText = entry.doc.getText(`file:${path}`);
+    if (yText.toString() !== content) {
+      entry.doc.transact(() => {
+        yText.delete(0, yText.length);
+        yText.insert(0, content);
+      });
+      entry.dirty = true;
+    }
   }
 
   setTree(sessionId: string, tree: CodeFileTreeNode[]): void {
@@ -128,6 +142,16 @@ export class CodeDocService implements OnModuleDestroy {
 
   getFocus(sessionId: string): CodeFocusPayload | undefined {
     return this.docsBySession.get(sessionId)?.focus;
+  }
+
+  setFoldersState(sessionId: string, expanded: string[]): void {
+    const entry = this.docsBySession.get(sessionId);
+    if (!entry) return;
+    entry.expandedFolders = expanded;
+  }
+
+  getFoldersState(sessionId: string): string[] | undefined {
+    return this.docsBySession.get(sessionId)?.expandedFolders;
   }
 
 

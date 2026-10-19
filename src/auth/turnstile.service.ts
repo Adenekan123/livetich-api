@@ -39,9 +39,17 @@ export class TurnstileService {
    * Validate a Turnstile token against Cloudflare's siteverify API.
    * If the secret key is not configured, the check passes immediately.
    */
-  async validateToken(token?: string, remoteIp?: string): Promise<boolean> {
-    if (!this.secretKey) {
-      // In development or environments without Turnstile configured, bypass verification
+  async validateToken(
+    token?: string,
+    remoteIp?: string,
+    clientHeader?: string,
+  ): Promise<boolean> {
+    if (
+      !this.secretKey ||
+      process.env.NODE_ENV !== 'production' ||
+      clientHeader === 'extension'
+    ) {
+      // In development, environments without Turnstile configured, or official IDE extensions, bypass verification
       return true;
     }
 

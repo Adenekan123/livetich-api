@@ -43,7 +43,7 @@ export class AuthController {
     private readonly audit: AuditService,
     private readonly quickAccess: QuickAccessService,
     private readonly turnstile: TurnstileService,
-  ) {}
+  ) { }
 
   // ---------- Quick access ----------
   //
@@ -166,10 +166,11 @@ export class AuthController {
   async login(@Body() dto: LoginDto, @Req() req: Request) {
     const ip = clientIp(req);
     const userAgent = req.headers['user-agent'] ?? null;
+    const clientHeader = req.headers['x-livetich-client'] as string | undefined;
     const token =
       dto.turnstileToken ||
       (req.headers['cf-turnstile-response'] as string | undefined);
-    await this.turnstile.validateToken(token, ip ?? undefined);
+    await this.turnstile.validateToken(token, ip ?? undefined, clientHeader);
     try {
       const result = await this.auth.login(dto);
       this.audit.record({
@@ -310,4 +311,5 @@ export class AuthController {
   ) {
     return this.auth.changePassword(user.sub, dto.currentPassword, dto.newPassword);
   }
+
 }

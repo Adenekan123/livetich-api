@@ -11,21 +11,30 @@ describe('TerminalService', () => {
 
   const instructorUser: JwtPayload = {
     sub: 'inst_1',
+    name: 'Instructor',
     email: 'inst@example.com',
+    emailVerified: true,
+    isSuperAdmin: false,
     role: Role.INSTRUCTOR,
     organizationId: 'org_1',
   };
 
   const student1: JwtPayload = {
     sub: 'stud_1',
+    name: 'Student 1',
     email: 'student1@example.com',
+    emailVerified: true,
+    isSuperAdmin: false,
     role: Role.STUDENT,
     organizationId: 'org_1',
   };
 
   const student2: JwtPayload = {
     sub: 'stud_2',
+    name: 'Student 2',
     email: 'student2@example.com',
+    emailVerified: true,
+    isSuperAdmin: false,
     role: Role.STUDENT,
     organizationId: 'org_1',
   };

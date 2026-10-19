@@ -22,6 +22,8 @@ import type {
   CodeFileTreeNode,
   CodeFocusPayload,
   CodePermissionPayload,
+  CodePointerPayload,
+  CodeSpotlightPayload,
   CodeServerToClientEvents,
 } from '../shared';
 import { CodeDocService } from './code-doc.service';
@@ -147,8 +149,20 @@ export class CodeGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return this.fail(client, 'FORBIDDEN', 'Code Instruction is not enabled');
     }
 
-    if (user.role === Role.INSTRUCTOR) {
-      if (session.course.instructorId !== user.sub) {
+    const isAdmin =
+      user.role === Role.ORG_ADMIN || (user.role as string) === 'SUPER_ADMIN';
+    if (isAdmin) {
+      if (
+        session.course.organizationId !== user.organizationId &&
+        (user.role as string) !== 'SUPER_ADMIN'
+      ) {
+        return this.fail(client, 'FORBIDDEN', 'Not your organization');
+      }
+    } else if (user.role === Role.INSTRUCTOR) {
+      if (
+        session.course.instructorId !== user.sub &&
+        session.course.organizationId !== user.organizationId
+      ) {
         return this.fail(client, 'FORBIDDEN', 'Not your session');
       }
     } else {
@@ -187,6 +201,11 @@ export class CodeGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const focus = this.docs.getFocus(p.sessionId);
     if (focus) {
       client.emit('code:focus', focus);
+    }
+
+    const expanded = this.docs.getFoldersState(p.sessionId);
+    if (expanded) {
+      client.emit('code:folders-state', { sessionId: p.sessionId, expanded });
     }
   }
 
@@ -255,6 +274,80 @@ export class CodeGateway implements OnGatewayConnection, OnGatewayDisconnect {
     client.to(p.sessionId).emit('code:focus', p);
   }
 
+  @SubscribeMessage('code:edit')
+  onEdit(
+    @ConnectedSocket() client: CodeSocket,
+    @MessageBody()
+    p: {
+      sessionId: string;
+      path: string;
+      content: string;
+      cursor?: { line: number; ch: number };
+    },
+  ) {
+    if (!this.inRoom(client, p.sessionId)) return;
+    if (!this.docs.canWrite(p.sessionId, client.data.user)) {
+      return this.fail(client, 'FORBIDDEN', 'The code editor is currently read-only for you');
+    }
+    this.docs.setFileContent(p.sessionId, p.path, p.content);
+    client.to(p.sessionId).emit('code:edit', p);
+  }
+
+  @SubscribeMessage('code:scroll')
+  onScroll(
+    @ConnectedSocket() client: CodeSocket,
+    @MessageBody() p: { sessionId: string; path: string; line: number },
+  ) {
+    if (!this.inRoom(client, p.sessionId)) return;
+    client.to(p.sessionId).emit('code:scroll', p);
+  }
+
+  @SubscribeMessage('code:folder-toggle')
+  onFolderToggle(
+    @ConnectedSocket() client: CodeSocket,
+    @MessageBody() p: { sessionId: string; path: string; collapsed: boolean },
+  ) {
+    if (!this.inRoom(client, p.sessionId)) return;
+    client.to(p.sessionId).emit('code:folder-toggle', p);
+  }
+
+  @SubscribeMessage('code:collapse-all')
+  onCollapseAll(
+    @ConnectedSocket() client: CodeSocket,
+    @MessageBody() p: { sessionId: string; collapsed: boolean },
+  ) {
+    if (!this.inRoom(client, p.sessionId)) return;
+    client.to(p.sessionId).emit('code:collapse-all', p);
+  }
+
+  @SubscribeMessage('code:folders-state')
+  onFoldersState(
+    @ConnectedSocket() client: CodeSocket,
+    @MessageBody() p: { sessionId: string; expanded: string[] },
+  ) {
+    if (!this.inRoom(client, p.sessionId)) return;
+    this.docs.setFoldersState(p.sessionId, p.expanded);
+    client.to(p.sessionId).emit('code:folders-state', p);
+  }
+
+  @SubscribeMessage('code:pointer')
+  onPointer(
+    @ConnectedSocket() client: CodeSocket,
+    @MessageBody() p: CodePointerPayload,
+  ) {
+    if (!this.inRoom(client, p.sessionId)) return;
+    client.to(p.sessionId).emit('code:pointer', p);
+  }
+
+  @SubscribeMessage('code:spotlight')
+  onSpotlight(
+    @ConnectedSocket() client: CodeSocket,
+    @MessageBody() p: CodeSpotlightPayload,
+  ) {
+    if (!this.inRoom(client, p.sessionId)) return;
+    client.to(p.sessionId).emit('code:spotlight', p);
+  }
+
   @SubscribeMessage('code:permission')
   onPermission(
     @ConnectedSocket() client: CodeSocket,
@@ -269,9 +362,38 @@ export class CodeGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.server.to(p.sessionId).emit('code:permission', p);
   }
 
+  @SubscribeMessage('code:tab-close')
+  onTabClose(
+    @ConnectedSocket() client: CodeSocket,
+    @MessageBody()
+    p: {
+      sessionId: string;
+      path?: string;
+      nextActive?: string;
+      all?: boolean;
+    },
+  ) {
+    if (!this.inRoom(client, p.sessionId)) return;
+    client.to(p.sessionId).emit('code:tab-close', p);
+  }
+
   private toBytes(data: BoardBinary): Uint8Array | null {
+    if (!data) return null;
     if (data instanceof Uint8Array) return data;
     if (data instanceof ArrayBuffer) return new Uint8Array(data);
+    const d = data as unknown;
+    if (ArrayBuffer.isView(d)) {
+      const view = d as ArrayBufferView;
+      return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+    }
+    if (Array.isArray(d)) return Uint8Array.from(d as number[]);
+    if (
+      typeof d === 'object' &&
+      d !== null &&
+      Array.isArray((d as { data?: unknown }).data)
+    ) {
+      return Uint8Array.from((d as { data: number[] }).data);
+    }
     return null;
   }
 
