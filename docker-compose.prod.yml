@@ -11,9 +11,7 @@ name: livetich
 
 services:
   caddy:
-    build:
-      context: .
-      dockerfile: Dockerfile.caddy
+    image: caddy:2
     restart: unless-stopped
     ports:
       - "80:80"
@@ -22,8 +20,6 @@ services:
     environment:
       APP_DOMAIN: ${APP_DOMAIN}
       API_DOMAIN: ${API_DOMAIN}
-      PREVIEW_DOMAIN: ${PREVIEW_DOMAIN}
-      CF_API_TOKEN: ${CF_API_TOKEN}
       # Caddyfile references {$ACME_EMAIL}; without it the config fails to parse
       # ("wrong argument count after 'email'") and Caddy crash-loops.
       ACME_EMAIL: ${ACME_EMAIL}
