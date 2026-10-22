@@ -281,6 +281,47 @@ export class GitHubApiService {
 
   // ---- Commits ------------------------------------------------------------
 
+  /** Resolve the current head of a branch through the installation. */
+  async getBranchHead(
+    installationId: string,
+    ref: RepoRef,
+    branch: string,
+  ): Promise<string | null> {
+    const res = await this.request(
+      installationId,
+      `/repos/${ref.owner}/${ref.repo}/branches/${encodeURIComponent(branch)}`,
+    );
+    if (res.status === 404) return null;
+    const body = await this.json<{ commit?: { sha?: string } }>(
+      res,
+      'read branch head',
+    );
+    return body.commit?.sha ?? null;
+  }
+
+  /** Read a Git blob as base64 so course updates can preserve binary assets. */
+  async readBlobBase64(
+    installationId: string,
+    ref: RepoRef,
+    sha: string,
+  ): Promise<{ contentBase64: string; size: number } | null> {
+    const res = await this.request(
+      installationId,
+      `/repos/${ref.owner}/${ref.repo}/git/blobs/${encodeURIComponent(sha)}`,
+    );
+    if (res.status === 404 || res.status === 422) return null;
+    const body = await this.json<{
+      encoding?: string;
+      content?: string;
+      size?: number;
+    }>(res, 'read a file blob');
+    if (body.encoding !== 'base64' || typeof body.content !== 'string') return null;
+    return {
+      contentBase64: body.content.replace(/\s/g, ''),
+      size: body.size ?? 0,
+    };
+  }
+
   /**
    * Resolve a ref to a commit. Used to confirm that the SHA a student's editor
    * reported really exists in their repository before a submission is pinned

@@ -113,29 +113,34 @@ export class TerminalService {
     return this.sessions.get(sessionId)?.get(terminalId)?.hostSocketId;
   }
 
+  isSandboxed(sessionId: string, terminalId: string): boolean {
+    return this.sessions.get(sessionId)?.get(terminalId)?.info.sandboxed === true;
+  }
+
+  isHostSocket(sessionId: string, terminalId: string, socketId: string): boolean {
+    return this.getHostSocketId(sessionId, terminalId) === socketId;
+  }
+
   canSendStdin(
     sessionId: string,
     terminalId: string,
     user: JwtPayload,
+    socketId: string,
   ): boolean {
     const term = this.sessions.get(sessionId)?.get(terminalId);
     if (!term || !term.info.interactive) return false;
 
-    // Host or instructor/admin always allowed
-    if (
-      term.hostUserId === user.sub ||
-      user.role === Role.INSTRUCTOR ||
-      user.role === Role.ORG_ADMIN
-    ) {
-      return true;
+    if (term.info.sandboxed) {
+      if (user.role === Role.INSTRUCTOR || user.role === Role.ORG_ADMIN) return true;
+      if (term.info.writableBy === 'OPEN') return true;
+      if (term.info.writableBy === 'DELEGATED') {
+        return Boolean(term.info.delegatedUserIds?.includes(user.sub));
+      }
+      return false;
     }
 
-    if (term.info.writableBy === 'OPEN') return true;
-    if (term.info.writableBy === 'DELEGATED') {
-      return Boolean(term.info.delegatedUserIds?.includes(user.sub));
-    }
-
-    return false;
+    // Legacy terminals are local host shells and never accept remote input.
+    return term.hostUserId === user.sub && term.hostSocketId === socketId;
   }
 
   cleanupSocket(

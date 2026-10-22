@@ -9,8 +9,10 @@ import {
 import { SkipThrottle } from '@nestjs/throttler';
 import { JwtService } from '@nestjs/jwt';
 import type { Request, Response } from 'express';
-import { Role, SessionStatus } from '@prisma/client';
+import { Role, SessionStatus, UserStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { AuthCacheService } from '../auth/auth-cache.service';
+import { Public } from '../auth/jwt-auth.guard';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { TunnelGateway } from './tunnel.gateway';
 import { TunnelService } from './tunnel.service';
@@ -40,8 +42,10 @@ export class ProxyController {
     private readonly tunnelGateway: TunnelGateway,
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
+    private readonly authCache: AuthCacheService,
   ) {}
 
+  @Public()
   @All(':sessionId/:port')
   async proxyRoot(
     @Param('sessionId') sessionId: string,
@@ -51,14 +55,17 @@ export class ProxyController {
   ) {
     // If accessing root without trailing slash on GET, redirect to trailing slash
     // so relative assets (e.g. "./main.js") resolve relative to the port proxy root.
-    if (req.method === 'GET' && !req.url.endsWith('/')) {
-      const queryIdx = req.url.indexOf('?');
-      const query = queryIdx !== -1 ? req.url.slice(queryIdx) : '';
+    // Ignore the query string: preview URLs carry an auth token there.
+    const pathname = req.originalUrl.split('?')[0];
+    if (req.method === 'GET' && !pathname.endsWith('/')) {
+      const queryIdx = req.originalUrl.indexOf('?');
+      const query = queryIdx !== -1 ? req.originalUrl.slice(queryIdx) : '';
       return res.redirect(307, `/proxy/${sessionId}/${portStr}/${query}`);
     }
     return this.forward(sessionId, portStr, '/', req, res);
   }
 
+  @Public()
   @All(':sessionId/:port/*')
   async proxySubpath(
     @Param('sessionId') sessionId: string,
@@ -66,7 +73,11 @@ export class ProxyController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const wildcard = (req.params as Record<string, string>)[0] ?? '';
+    const wildcardParams = req.params as Record<string, string | string[]>;
+    // Nest 11/path-to-regexp returns named wildcard segments as an array.
+    // Keep the numeric key fallback for adapters with the legacy shape.
+    const rawWildcard = wildcardParams.path ?? wildcardParams[0] ?? '';
+    const wildcard = Array.isArray(rawWildcard) ? rawWildcard.join('/') : rawWildcard;
     const subpath = '/' + wildcard;
     return this.forward(sessionId, portStr, subpath, req, res);
   }
@@ -78,6 +89,10 @@ export class ProxyController {
     req: Request,
     res: Response,
   ) {
+    // This session-authorized endpoint is intentionally loaded by the web app
+    // inside an iframe; Helmetâ€™s API-wide anti-frame headers block that use.
+    res.removeHeader('X-Frame-Options');
+    res.removeHeader('Content-Security-Policy');
     const port = parseInt(portStr, 10);
     if (isNaN(port) || port < 1 || port > 65535) {
       return res.status(400).send('Invalid port number');
@@ -101,13 +116,35 @@ export class ProxyController {
       return res.status(401).send('Invalid or expired authorization token');
     }
 
-    // Set cookie on the response so subresource assets (images, css, js) succeed
+    // This route accepts the short-lived realtime token in a query parameter
+    // or cookie because browser iframes cannot set Authorization headers.
+    // Mirror the global guard's account checks here and reject recorder tokens.
+    if (user.recorder) {
+      return res.status(401).send('Recorder tokens cannot access forwarded ports');
+    }
+    const account = await this.authCache.getState(user.sub);
+    if (!account || account.status === UserStatus.DISABLED) {
+      return res.status(401).send('This account is not permitted');
+    }
+    if (!account.emailVerified) {
+      return res.status(403).send('Email not verified');
+    }
+
+    // A preview origin is unique to this session/port, so scope its auth cookie
+    // to `/`; the legacy path proxy keeps its narrower cookie path.
+    const previewDomain = process.env.PREVIEW_DOMAIN?.trim().toLowerCase().replace(/^\.+|\.+$/g, '');
+    const hostname = req.hostname.toLowerCase();
+    const isHostPreview = hostname.endsWith('.localhost') ||
+      Boolean(previewDomain && hostname.endsWith(`.${previewDomain}`));
     res.cookie('livetich_proxy_token', token, {
       httpOnly: true,
-      sameSite: 'lax',
-      secure: process.env.NODE_ENV === 'production',
+      sameSite: isHostPreview ? 'none' : 'lax',
+      // Browsers must allow the preview iframe's cookie in a cross-origin
+      // classroom embed; HTTPS is used in production and localhost is a secure
+      // context in modern browsers during local development.
+      secure: isHostPreview || req.secure,
       maxAge: 4 * 60 * 60 * 1000,
-      path: `/proxy/${sessionId}/${port}/`,
+      path: isHostPreview ? '/' : `/proxy/${sessionId}/${port}/`,
     });
 
     // 2. Validate session & user enrollment
@@ -200,7 +237,9 @@ export class ProxyController {
     }
     forwardedHeaders['x-forwarded-for'] = req.ip ?? '127.0.0.1';
     forwardedHeaders['x-forwarded-proto'] = req.protocol;
-    forwardedHeaders['x-forwarded-prefix'] = `/proxy/${sessionId}/${port}`;
+    if (!isHostPreview) {
+      forwardedHeaders['x-forwarded-prefix'] = `/proxy/${sessionId}/${port}`;
+    }
     forwardedHeaders['host'] = `localhost:${port}`;
 
     // Clean query param

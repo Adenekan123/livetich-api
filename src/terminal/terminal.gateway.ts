@@ -151,8 +151,20 @@ export class TerminalGateway
       return this.fail(client, 'FORBIDDEN', 'Code Instruction is not enabled');
     }
 
-    if (user.role === Role.INSTRUCTOR) {
-      if (session.course.instructorId !== user.sub) {
+    const isAdmin =
+      user.role === Role.ORG_ADMIN || (user.role as string) === 'SUPER_ADMIN';
+    if (isAdmin) {
+      if (
+        session.course.organizationId !== user.organizationId &&
+        (user.role as string) !== 'SUPER_ADMIN'
+      ) {
+        return this.fail(client, 'FORBIDDEN', 'Not your organization');
+      }
+    } else if (user.role === Role.INSTRUCTOR) {
+      if (
+        session.course.instructorId !== user.sub &&
+        session.course.organizationId !== user.organizationId
+      ) {
         return this.fail(client, 'FORBIDDEN', 'Not your session');
       }
     } else {
@@ -219,6 +231,7 @@ export class TerminalGateway
     },
   ) {
     if (!this.inRoom(client, p.sessionId)) return;
+    if (!this.isTerminalHost(client, p.sessionId, p.terminalId)) return;
     this.terminalService.appendData(p.sessionId, p.terminalId, p.data);
     client.to(p.sessionId).emit('term:data', p);
   }
@@ -235,6 +248,7 @@ export class TerminalGateway
     },
   ) {
     if (!this.inRoom(client, p.sessionId)) return;
+    if (!this.isTerminalHost(client, p.sessionId, p.terminalId)) return;
     this.terminalService.resizeTerminal(
       p.sessionId,
       p.terminalId,
@@ -256,9 +270,24 @@ export class TerminalGateway
     },
   ) {
     if (!this.inRoom(client, p.sessionId)) return;
+    if (!this.isTerminalHost(client, p.sessionId, p.terminalId)) return;
+    if (!['INSTRUCTOR_ONLY', 'OPEN', 'DELEGATED'].includes(p.writableBy)) {
+      return this.fail(client, 'INVALID_INPUT', 'Unknown terminal permission mode');
+    }
+    if (p.delegatedUserIds && (p.delegatedUserIds.length > 100 || p.delegatedUserIds.some((id) => typeof id !== 'string' || id.length > 128))) {
+      return this.fail(client, 'INVALID_INPUT', 'Terminal delegation list is invalid');
+    }
     const user = client.data.user;
     if (user.role !== Role.INSTRUCTOR && user.role !== Role.ORG_ADMIN) {
       return this.fail(client, 'FORBIDDEN', 'Only instructors can change terminal permissions');
+    }
+
+    if (!this.terminalService.isSandboxed(p.sessionId, p.terminalId) && p.writableBy !== 'INSTRUCTOR_ONLY') {
+      return this.fail(
+        client,
+        'FORBIDDEN',
+        'Shared terminal input is disabled until isolated code execution is available',
+      );
     }
 
     this.terminalService.updatePermission(
@@ -281,8 +310,11 @@ export class TerminalGateway
     },
   ) {
     if (!this.inRoom(client, p.sessionId)) return;
+    if (typeof p.data !== 'string' || p.data.length > 4096) {
+      return this.fail(client, 'INVALID_INPUT', 'Terminal input must be 4 KB or smaller');
+    }
     const user = client.data.user;
-    if (!this.terminalService.canSendStdin(p.sessionId, p.terminalId, user)) {
+    if (!this.terminalService.canSendStdin(p.sessionId, p.terminalId, user, client.id)) {
       return this.fail(client, 'FORBIDDEN', 'Terminal input is currently locked for you');
     }
 
@@ -306,6 +338,7 @@ export class TerminalGateway
     @MessageBody() p: { sessionId: string; terminalId: string },
   ) {
     if (!this.inRoom(client, p.sessionId)) return;
+    if (!this.isTerminalHost(client, p.sessionId, p.terminalId)) return;
     this.terminalService.closeTerminal(p.sessionId, p.terminalId);
     this.server.to(p.sessionId).emit('term:closed', p);
   }
@@ -313,6 +346,16 @@ export class TerminalGateway
   private inRoom(client: TerminalSocket, sessionId: string): boolean {
     if (client.data.sessionIds?.has(sessionId)) return true;
     this.fail(client, 'NOT_IN_ROOM', 'Join the terminal room first');
+    return false;
+  }
+
+  private isTerminalHost(
+    client: TerminalSocket,
+    sessionId: string,
+    terminalId: string,
+  ): boolean {
+    if (this.terminalService.isHostSocket(sessionId, terminalId, client.id)) return true;
+    this.fail(client, 'FORBIDDEN', 'Only the terminal host can publish, resize, change permissions, or close this terminal');
     return false;
   }
 

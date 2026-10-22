@@ -550,6 +550,9 @@ export interface ServerToClientEvents {
    *  student clients leave the room. Reason lets the UI phrase it. */
   'room:closed': (p: { sessionId: string; reason: 'ENDED' }) => void;
 
+  /** A recording started or stopped in this class. Broadcast so all clients play the tone. */
+  'recording:status': (p: { sessionId: string; recording: boolean }) => void;
+
   'chat:message': (p: ChatMessage) => void;
   /** Recent messages, sent once to the joining client. */
   'chat:history': (p: { sessionId: string; messages: ChatMessage[] }) => void;
@@ -727,14 +730,61 @@ export interface CodeFileTreeNode {
 
 export interface CodeFocusPayload {
   sessionId: string;
+  /** Assigned by the gateway after validating the session controller. */
+  controllerUserId?: string;
+  /** True only for the snapshot returned to a newly joined client. */
+  isSnapshot?: boolean;
   path: string;
   cursor?: { line: number; ch: number };
+  selection?: {
+    anchor: { line: number; ch: number };
+    active: { line: number; ch: number };
+  };
+  content?: string;
+  openFiles?: string[];
 }
 
 export interface CodePermissionPayload {
   sessionId: string;
   mode: CodeWritePermissionMode;
   delegatedUserIds?: string[];
+}
+
+export interface CodeCursorPayload {
+  sessionId: string;
+  controllerUserId?: string;
+  sourceId: string;
+  sequence: number;
+  path: string;
+  line: number;
+  ch: number;
+  selection?: {
+    anchor: { line: number; ch: number };
+    active: { line: number; ch: number };
+  };
+}
+
+export interface CodePointerPayload {
+  sessionId: string;
+  controllerUserId?: string;
+  sourceId?: string;
+  sequence?: number;
+  path?: string;
+  kind?: 'move' | 'click';
+  target?: string;
+  isFolder?: boolean;
+  x?: number;
+  y?: number;
+  surface?: 'sidebar' | 'editor';
+  isClick?: boolean;
+  line?: number;
+  ch?: number;
+}
+
+export interface CodeSpotlightPayload {
+  sessionId: string;
+  path: string;
+  line: number;
 }
 
 /**
@@ -753,18 +803,76 @@ export interface CodeClientToServerEvents {
   'code:tree': (p: { sessionId: string; tree: CodeFileTreeNode[] }) => void;
   /** Host broadcasts active file focus and cursor position for follow-mode. */
   'code:focus': (p: CodeFocusPayload) => void;
+  /** Controller caret position, separate from physical mouse pointer movement. */
+  'code:cursor': (p: CodeCursorPayload) => void;
+  /** Host broadcasts live text edit content and cursor. */
+  'code:edit': (p: { sessionId: string; path: string; content: string; cursor?: { line: number; ch: number } }) => void;
+  /** Host broadcasts editor visible scroll position for follow-mode. */
+  'code:scroll': (p: { sessionId: string; path: string; line: number }) => void;
+  /** Host broadcasts folder expand/collapse state changes. */
+  'code:folder-toggle': (p: { sessionId: string; path: string; collapsed: boolean }) => void;
+  /** Host broadcasts collapse-all or expand-all across workspace. */
+  'code:collapse-all': (p: { sessionId: string; collapsed: boolean }) => void;
+  /** Host broadcasts full list of expanded folder relative paths. */
+  'code:folders-state': (p: { sessionId: string; expanded: string[] }) => void;
+  /** Collaborative pointer on sidebar or surface. */
+  'code:pointer': (p: CodePointerPayload) => void;
+  /** Instructor broadcasts ephemeral code spotlight/laser on a line. */
+  'code:spotlight': (p: CodeSpotlightPayload) => void;
   /** Instructor manages collaborative editing permission mode. */
   'code:permission': (p: CodePermissionPayload) => void;
+  /** Only the session controller may mirror tab closure to peers. */
+  'code:tab-close': (p: {
+    sessionId: string;
+    requestId?: string;
+    path?: string;
+    nextActive?: string;
+    openFiles?: string[];
+    all?: boolean;
+  }) => void;
+  /** Local IDE reports the tab state that actually remained after closing prompts. */
+  'code:tab-close-result': (p: {
+    sessionId: string;
+    requestId: string;
+    activePath: string;
+    openFiles: string[];
+  }) => void;
 }
 
 export interface CodeServerToClientEvents {
   /** Full document state, sent to the joining client after code:join. */
   'code:state': (p: { sessionId: string; update: BoardBinary }) => void;
+  /** Join authorization and initial state delivery have completed. */
+  'code:joined': (p: { sessionId: string }) => void;
   'code:update': (p: { sessionId: string; update: BoardBinary }) => void;
   'code:awareness': (p: { sessionId: string; update: BoardBinary }) => void;
   'code:tree': (p: { sessionId: string; tree: CodeFileTreeNode[] }) => void;
   'code:focus': (p: CodeFocusPayload) => void;
+  'code:cursor': (p: CodeCursorPayload) => void;
+  'code:edit': (p: { sessionId: string; path: string; content: string; cursor?: { line: number; ch: number } }) => void;
+  'code:scroll': (p: { sessionId: string; path: string; line: number }) => void;
+  'code:folder-toggle': (p: { sessionId: string; path: string; collapsed: boolean }) => void;
+  'code:collapse-all': (p: { sessionId: string; collapsed: boolean }) => void;
+  'code:folders-state': (p: { sessionId: string; expanded: string[] }) => void;
+  'code:pointer': (p: CodePointerPayload) => void;
+  'code:spotlight': (p: CodeSpotlightPayload) => void;
   'code:permission': (p: CodePermissionPayload) => void;
+  'code:tab-close': (p: {
+    sessionId: string;
+    requestId?: string;
+    path?: string;
+    nextActive?: string;
+    openFiles?: string[];
+    all?: boolean;
+    controllerUserId?: string;
+  }) => void;
+  'code:tab-close-result': (p: {
+    sessionId: string;
+    requestId: string;
+    activePath: string;
+    openFiles: string[];
+    controllerUserId: string;
+  }) => void;
 
   error: (p: { code: string; message: string }) => void;
 }
@@ -779,6 +887,7 @@ export interface TerminalSessionInfo {
   cols: number;
   rows: number;
   interactive: boolean;
+  sandboxed?: boolean;
   writableBy: TerminalWritableMode;
   delegatedUserIds?: string[];
 }
@@ -852,6 +961,8 @@ export interface ForwardedPortInfo {
   port: number;
   label?: string;
   targetUrl?: string;
+  /** Root-origin URL used for browser previews; keeps app assets and HMR at `/`. */
+  previewUrl?: string;
   registeredAt: string;
 }
 
@@ -872,6 +983,10 @@ export interface TunnelClientToServerEvents {
   'tunnel:response:end': (p: { reqId: string }) => void;
   'tunnel:response:error': (p: { reqId: string; message: string }) => void;
 
+  'tunnel:ws:ready': (p: { bridgeId: string; ok: boolean; message?: string }) => void;
+  'tunnel:ws:message': (p: { bridgeId: string; data: string; isBinary: boolean }) => void;
+  'tunnel:ws:closed': (p: { bridgeId: string; code: number; reason?: string }) => void;
+
   'tunnel:join': (p: { sessionId: string }) => void;
   'tunnel:leave': (p: { sessionId: string }) => void;
 }
@@ -891,6 +1006,10 @@ export interface TunnelServerToClientEvents {
   }) => void;
 
   'tunnel:abort': (p: { reqId: string }) => void;
+
+  'tunnel:ws:connect': (p: { bridgeId: string; port: number; path: string }) => void;
+  'tunnel:ws:message': (p: { bridgeId: string; data: string; isBinary: boolean }) => void;
+  'tunnel:ws:close': (p: { bridgeId: string; code: number; reason?: string }) => void;
 
   error: (p: { code: string; message: string }) => void;
 }

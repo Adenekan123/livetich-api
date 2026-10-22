@@ -37,6 +37,25 @@ export class TunnelService {
     return `${sessionId}:${port}`;
   }
 
+  private previewUrl(sessionId: string, port: number): string {
+    const sessionHost = `${sessionId}-${port}`;
+    const configuredDomain = process.env.PREVIEW_DOMAIN?.trim().replace(/^\.+|\.+$/g, '');
+    if (configuredDomain) return `https://${sessionHost}.${configuredDomain}/`;
+
+    const configuredBase = process.env.PREVIEW_BASE_URL?.trim();
+    if (configuredBase) {
+      const base = new URL(configuredBase);
+      base.hostname = `${sessionHost}.localhost`;
+      base.pathname = '/';
+      base.search = '';
+      base.hash = '';
+      return base.toString();
+    }
+
+    // Local development: *.localhost resolves to loopback in modern browsers.
+    return `http://${sessionHost}.localhost:${process.env.PORT ?? 3000}/`;
+  }
+
   registerPort(
     sessionId: string,
     port: number,
@@ -59,6 +78,7 @@ export class TunnelService {
       port: info.port,
       label: info.label,
       targetUrl: info.targetUrl,
+      previewUrl: this.previewUrl(sessionId, port),
       registeredAt: info.registeredAt,
     };
   }
@@ -76,6 +96,7 @@ export class TunnelService {
           port: p.port,
           label: p.label,
           targetUrl: p.targetUrl,
+          previewUrl: this.previewUrl(p.sessionId, p.port),
           registeredAt: p.registeredAt,
         });
       }

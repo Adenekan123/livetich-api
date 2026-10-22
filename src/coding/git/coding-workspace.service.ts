@@ -1,9 +1,11 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import {
   CodingSubmissionMode,
@@ -45,6 +47,24 @@ export interface WorkspaceSummary {
   repositoryFullName: string | null;
 }
 
+export interface CourseUpdateFile {
+  path: string;
+  operation: 'WRITE' | 'DELETE';
+  disposition: 'APPLY' | 'CONFLICT' | 'ALREADY_APPLIED' | 'UNSUPPORTED';
+  contentBase64?: string;
+  size?: number;
+}
+
+export interface CourseUpdatePlan {
+  status: 'UP_TO_DATE' | 'UPDATE_AVAILABLE';
+  courseRepository: string;
+  checkpointTitle: string;
+  baseSha: string | null;
+  courseSha: string;
+  studentSha: string;
+  files: CourseUpdateFile[];
+}
+
 /**
  * How long a workspace may sit in PROVISIONING before another Start may take
  * it over. Creating a repository takes a couple of seconds; anything still
@@ -70,6 +90,10 @@ export interface WorkspaceView {
    */
   submissionMode: CodingSubmissionMode | null;
 }
+
+const MAX_UPDATE_FILES = 300;
+const MAX_UPDATE_FILE_BYTES = 5 * 1024 * 1024;
+const MAX_UPDATE_TOTAL_BYTES = 20 * 1024 * 1024;
 
 @Injectable()
 export class CodingWorkspaceService {
@@ -211,6 +235,240 @@ export class CodingWorkspaceService {
     }));
   }
 
+  /**
+   * Compare the instructor's current course repository with the last checkpoint
+   * this student received and their own GitHub workspace. No writes happen here.
+   */
+  async courseUpdate(
+    user: JwtPayload,
+    enrollmentId: string,
+  ): Promise<CourseUpdatePlan> {
+    const ctx = await this.loadContext(user, enrollmentId);
+    const workspace = ctx.workspace;
+    if (
+      !workspace ||
+      workspace.status !== CodingWorkspaceStatus.ACTIVE ||
+      !workspace.githubRepositoryFullName
+    ) {
+      throw new BadRequestException('Start your coding workspace first.');
+    }
+    if (!ctx.templateRepositoryName || !ctx.connectionActive) {
+      throw new BadRequestException(
+        'Your instructor has not connected a course repository yet.',
+      );
+    }
+
+    const [owner, studentRepository] =
+      workspace.githubRepositoryFullName.split('/');
+    if (!owner || !studentRepository) {
+      throw new BadRequestException(
+        'The student repository is not configured correctly.',
+      );
+    }
+    const sourceRef = {
+      owner: ctx.connectionLogin,
+      repo: ctx.templateRepositoryName,
+    };
+    const studentRef = { owner, repo: studentRepository };
+    const sourceSha = await this.github.getBranchHead(
+      ctx.installationId,
+      sourceRef,
+      ctx.defaultBranch,
+    );
+    const studentSha = await this.github.getBranchHead(
+      ctx.installationId,
+      studentRef,
+      workspace.defaultBranch,
+    );
+    if (!sourceSha || !studentSha) {
+      throw new ServiceUnavailableException(
+        'Could not read the latest course or student project version.',
+      );
+    }
+    const sourceCommit = await this.github.getCommit(
+      ctx.installationId,
+      sourceRef,
+      sourceSha,
+    );
+    const checkpointTitle = sourceCommit?.message
+      .replace(/^Livetich: class update\s*-\s*/i, '')
+      .split('\n', 1)[0]
+      .trim() || 'Latest class update';
+    const baseSha = workspace.courseBaseSha;
+    if (baseSha === sourceSha) {
+      return {
+        status: 'UP_TO_DATE',
+        courseRepository: `${sourceRef.owner}/${sourceRef.repo}`,
+        checkpointTitle,
+        baseSha,
+        courseSha: sourceSha,
+        studentSha,
+        files: [],
+      };
+    }
+
+    const [courseTree, studentTree, baseTree] = await Promise.all([
+      this.github.listTree(ctx.installationId, sourceRef, sourceSha),
+      this.github.listTree(ctx.installationId, studentRef, studentSha),
+      baseSha
+        ? this.github.listTree(ctx.installationId, sourceRef, baseSha)
+        : Promise.resolve(null),
+    ]);
+    if (
+      !courseTree ||
+      !studentTree ||
+      (baseSha && !baseTree) ||
+      courseTree.truncated ||
+      studentTree.truncated ||
+      baseTree?.truncated
+    ) {
+      throw new ServiceUnavailableException(
+        'This project is too large to compare safely right now.',
+      );
+    }
+
+    const courseFiles = new Map(courseTree.files.map((file) => [file.path, file]));
+    const studentFiles = new Map(studentTree.files.map((file) => [file.path, file]));
+    const baseFiles = new Map((baseTree?.files ?? []).map((file) => [file.path, file]));
+    const paths = new Set([...baseFiles.keys(), ...courseFiles.keys()]);
+    const changedPaths = [...paths]
+      .filter((path) => isCourseSyncPath(path))
+      .filter((path) => baseFiles.get(path)?.sha !== courseFiles.get(path)?.sha)
+      .sort();
+
+    if (changedPaths.length > MAX_UPDATE_FILES) {
+      throw new ServiceUnavailableException(
+        'This course update changes too many files to apply safely.',
+      );
+    }
+
+    let totalBytes = 0;
+    const files: CourseUpdateFile[] = [];
+    for (const path of changedPaths) {
+      const base = baseFiles.get(path);
+      const course = courseFiles.get(path);
+      const student = studentFiles.get(path);
+      const operation = course ? 'WRITE' : 'DELETE';
+      if (course?.size && course.size > MAX_UPDATE_FILE_BYTES) {
+        files.push({ path, operation, disposition: 'UNSUPPORTED' });
+        continue;
+      }
+      if (course?.size) totalBytes += course.size;
+      if (totalBytes > MAX_UPDATE_TOTAL_BYTES) {
+        throw new ServiceUnavailableException(
+          'This course update is larger than Livetich can safely transfer.',
+        );
+      }
+
+      const alreadyApplied = course?.sha === student?.sha || (!course && !student);
+      const safeToApply = student?.sha === base?.sha || (!base && !student);
+      const disposition = alreadyApplied
+        ? 'ALREADY_APPLIED'
+        : safeToApply
+          ? 'APPLY'
+          : 'CONFLICT';
+
+      let contentBase64: string | undefined;
+      if (course && disposition !== 'ALREADY_APPLIED') {
+        const blob = await this.github.readBlobBase64(
+          ctx.installationId,
+          sourceRef,
+          course.sha,
+        );
+        if (!blob || blob.size > MAX_UPDATE_FILE_BYTES) {
+          files.push({ path, operation, disposition: 'UNSUPPORTED' });
+          continue;
+        }
+        contentBase64 = blob.contentBase64;
+      }
+      files.push({
+        path,
+        operation,
+        disposition,
+        ...(contentBase64 !== undefined ? { contentBase64 } : {}),
+        ...(course ? { size: course.size } : {}),
+      });
+    }
+
+    return {
+      status: files.some((file) => file.disposition !== 'ALREADY_APPLIED')
+        ? 'UPDATE_AVAILABLE'
+        : 'UP_TO_DATE',
+      courseRepository: `${sourceRef.owner}/${sourceRef.repo}`,
+      checkpointTitle,
+      baseSha,
+      courseSha: sourceSha,
+      studentSha,
+      files,
+    };
+  }
+
+  /** Advance the course base only after both exact commits reached GitHub. */
+  async acknowledgeCourseUpdate(
+    user: JwtPayload,
+    enrollmentId: string,
+    dto: { expectedBaseSha?: string; courseSha: string; studentCommitSha: string },
+  ): Promise<{ courseBaseSha: string }> {
+    const ctx = await this.loadContext(user, enrollmentId);
+    const workspace = ctx.workspace;
+    if (
+      !workspace ||
+      workspace.status !== CodingWorkspaceStatus.ACTIVE ||
+      !workspace.githubRepositoryFullName
+    ) {
+      throw new BadRequestException('Start your coding workspace first.');
+    }
+    if (workspace.courseBaseSha !== (dto.expectedBaseSha ?? null)) {
+      throw new ConflictException(
+        'Your course update plan is out of date. Check for updates again.',
+      );
+    }
+    if (!ctx.templateRepositoryName || !ctx.connectionActive) {
+      throw new BadRequestException(
+        'Your instructor has not connected a course repository yet.',
+      );
+    }
+    const [owner, repository] = workspace.githubRepositoryFullName.split('/');
+    if (!owner || !repository) {
+      throw new BadRequestException(
+        'The student repository is not configured correctly.',
+      );
+    }
+    const sourceRef = {
+      owner: ctx.connectionLogin,
+      repo: ctx.templateRepositoryName,
+    };
+    const studentRef = { owner, repo: repository };
+    const [courseHead, studentHead, studentCommit] = await Promise.all([
+      this.github.getBranchHead(ctx.installationId, sourceRef, ctx.defaultBranch),
+      this.github.getBranchHead(
+        ctx.installationId,
+        studentRef,
+        workspace.defaultBranch,
+      ),
+      this.github.getCommit(
+        ctx.installationId,
+        studentRef,
+        dto.studentCommitSha,
+      ),
+    ]);
+    if (courseHead !== dto.courseSha) {
+      throw new ConflictException(
+        'The instructor published another update while you were syncing. Check again.',
+      );
+    }
+    if (!studentCommit || studentHead !== dto.studentCommitSha) {
+      throw new ConflictException(
+        'Your project changed while syncing. Save or pull your latest work, then try again.',
+      );
+    }
+    await this.prisma.codingEnrollmentWorkspace.update({
+      where: { id: workspace.id },
+      data: { courseBaseSha: dto.courseSha, lastSyncedAt: new Date() },
+    });
+    return { courseBaseSha: dto.courseSha };
+  }
+
   // ---- Provisioning -------------------------------------------------------
 
   /**
@@ -274,7 +532,6 @@ export class CodingWorkspaceService {
     });
     const owner = ctx.connectionLogin;
     const installationId = ctx.installationId;
-
     // Ask GitHub first. A previous attempt may have created the repository and
     // failed before recording it; creating again would be the duplicate §39
     // forbids.
@@ -282,6 +539,16 @@ export class CodingWorkspaceService {
       owner,
       repo: name,
     });
+    // A repo left behind by an interrupted provisioning attempt has no known
+    // source revision. Keep its baseline null so first sync compares safely
+    // without assuming that the current template was the version it received.
+    const courseBaseSha = !existing && ctx.templateRepositoryName
+      ? await this.github.getBranchHead(
+          installationId,
+          { owner, repo: ctx.templateRepositoryName },
+          ctx.defaultBranch,
+        )
+      : null;
     const repo =
       existing ??
       (ctx.templateRepositoryName
@@ -314,6 +581,7 @@ export class CodingWorkspaceService {
         githubRepositoryName: repo.name,
         githubRepositoryFullName: repo.fullName,
         defaultBranch: repo.defaultBranch || ctx.defaultBranch,
+        courseBaseSha,
         lastError: null,
         lastSyncedAt: new Date(),
       },
@@ -496,6 +764,7 @@ interface WorkspaceContext {
     status: CodingWorkspaceStatus;
     githubRepositoryFullName: string | null;
     defaultBranch: string;
+    courseBaseSha: string | null;
   } | null;
   studentId: string;
   githubLogin: string;
@@ -516,4 +785,59 @@ interface WorkspaceContext {
   connectionLogin: string;
   installationId: string;
   connectionActive: boolean;
+}
+
+/** Exclude unsafe paths and generated directories from propagated updates. */
+function isCourseSyncPath(value: string): boolean {
+  const path = value.replace(/\\/g, '/');
+  if (
+    !path ||
+    path.startsWith('/') ||
+    /^[a-z]:/i.test(path) ||
+    path.split('/').some((part) => !part || part === '.' || part === '..')
+  ) {
+    return false;
+  }
+  const parts = path.toLowerCase().split('/');
+  if (
+    parts.some((part) =>
+      [
+        '.git',
+        '.aws',
+        '.ssh',
+        '.secrets',
+        '.docker',
+        'secrets',
+        'node_modules',
+        'dist',
+        'build',
+        '.next',
+      ].includes(part),
+    )
+  ) {
+    return false;
+  }
+  const name = parts[parts.length - 1];
+  if (
+    name === '.env.example' ||
+    name === '.env.sample' ||
+    name === '.env.template'
+  ) {
+    return true;
+  }
+  return !(
+    name === '.env' ||
+    name.startsWith('.env.') ||
+    name === '.npmrc' ||
+    name === '.netrc' ||
+    name === 'credentials' ||
+    name === 'credentials.json' ||
+    name === 'secrets.json' ||
+    name.endsWith('.pem') ||
+    name.endsWith('.key') ||
+    name.endsWith('.p12') ||
+    name.endsWith('.pfx') ||
+    name.startsWith('id_rsa') ||
+    name.startsWith('id_ed25519')
+  );
 }

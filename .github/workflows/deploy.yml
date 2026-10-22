@@ -14,6 +14,7 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/adenekan123/livetich-api
+  CADDY_IMAGE: ghcr.io/adenekan123/livetich-caddy
   TAG: ${{ github.ref_name == 'main' && 'prod' || 'staging' }}
   ENVIRONMENT: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
 
@@ -58,6 +59,16 @@ jobs:
             ${{ env.IMAGE }}:${{ github.sha }}
           cache-from: type=gha,scope=${{ env.TAG }}
           cache-to: type=gha,mode=max,scope=${{ env.TAG }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.caddy
+          push: true
+          tags: |
+            ${{ env.CADDY_IMAGE }}:${{ env.TAG }}
+            ${{ env.CADDY_IMAGE }}:${{ github.sha }}
+          cache-from: type=gha,scope=caddy-${{ env.TAG }}
+          cache-to: type=gha,mode=max,scope=caddy-${{ env.TAG }}
 
   deploy:
     needs: build
@@ -86,14 +97,15 @@ jobs:
             git pull -q --ff-only origin ${{ github.ref_name }}
             if [ "${{ env.ENVIRONMENT }}" = "production" ]; then ./deploy/backup.sh; fi
             C="docker compose --env-file deploy/.env.prod -f docker-compose.prod.yml"
-            $C pull api
+            $C pull api caddy
             # --wait blocks until the container's healthcheck (/health) passes,
             # so a broken release fails this job instead of going quiet.
             $C up -d --no-build --wait --wait-timeout 300 api
             # Caddy's own definition lives in the compose file too (its network
             # aliases, for one). Compose recreates it only when that changed, so
             # an ordinary release leaves the edge alone.
+            $C run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
             $C up -d --no-build --no-deps caddy
-            $C exec -T caddy caddy reload --config /etc/caddy/Caddyfile || true
+            $C exec -T caddy caddy reload --config /etc/caddy/Caddyfile
             docker image prune -f >/dev/null
             echo "Deployed ${{ github.sha }} to ${{ env.ENVIRONMENT }}"

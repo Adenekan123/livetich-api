@@ -1542,8 +1542,9 @@ model CodingEnrollmentWorkspace {
 
   status CodingWorkspaceStatus @default(NOT_CREATED)
   /// Why provisioning failed, shown to no one but kept for support.
-  lastError    String?   @db.Text
-  lastSyncedAt DateTime?
+  lastError     String?   @db.Text
+  lastSyncedAt  DateTime?
+  courseBaseSha String?   @db.VarChar(40)
 
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt

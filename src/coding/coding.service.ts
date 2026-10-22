@@ -1,5 +1,7 @@
 import {
+  BadRequestException,
   ForbiddenException,
+  Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -17,6 +19,17 @@ import { CodingLiveService } from './coding-live.service';
 import { forStudent } from './ai-visibility';
 import { CreateCodingAssignmentDto } from './dto/create-coding-assignment.dto';
 import { UpdateCodingAssignmentDto } from './dto/update-coding-assignment.dto';
+import { OBJECT_STORAGE } from '../storage/object-storage';
+import type { ObjectStorage } from '../storage/object-storage';
+import { indexArchive } from './coding-archive.util';
+import AdmZip from 'adm-zip';
+
+interface StarterUpload {
+  buffer: Buffer;
+  mimetype: string;
+  size: number;
+  originalname?: string;
+}
 
 /**
  * Coding Instructor Plugin — authoring & delivery of rich coding assignments.
@@ -29,7 +42,60 @@ export class CodingService {
     private readonly prisma: PrismaService,
     private readonly courses: CoursesService,
     private readonly live: CodingLiveService,
+    @Inject(OBJECT_STORAGE) private readonly storage: ObjectStorage,
   ) {}
+
+  /** Store an instructor-authored task starter as an immutable ZIP snapshot. */
+  async uploadStarter(user: JwtPayload, id: string, file?: StarterUpload) {
+    if (!file) throw new BadRequestException('Choose a starter .zip archive');
+    if (file.size > 25 * 1024 * 1024) {
+      throw new BadRequestException('Starter archive is larger than 25 MB');
+    }
+    if (!/zip/i.test(file.mimetype) && !/\.zip$/i.test(file.originalname ?? '')) {
+      throw new BadRequestException('Upload a .zip starter archive');
+    }
+    const assignment = await this.getManageable(user, id);
+    if (assignment.status !== CodingAssignmentStatus.DRAFT) {
+      throw new BadRequestException('Starter can only be changed before the task opens');
+    }
+    try {
+      const zip = new AdmZip(file.buffer);
+      let fileCount = 0;
+      for (const entry of zip.getEntries()) {
+        if (entry.isDirectory) continue;
+        fileCount++;
+        if (fileCount > 500) throw new Error('Starter archive contains more than 500 files');
+        const name = entry.entryName.replace(/\\/g, '/');
+        const mode = (entry.attr >>> 16) & 0xf000;
+        const parts = name.split('/');
+        const skipped = new Set(['node_modules','.git','dist','build','.next','out','coverage','.venv','venv','__pycache__']);
+        if (!name || name.startsWith('/') || /^[a-zA-Z]:/.test(name) || parts.some((part) => part === '..' || skipped.has(part)) || mode === 0xa000) {
+          throw new Error('Starter archive contains an unsafe file path or symbolic link');
+        }
+      }
+      indexArchive(file.buffer);
+    } catch (error) {
+      throw new BadRequestException(error instanceof Error ? error.message : 'Invalid starter archive');
+    }
+    await this.storage.put(starterKey(id), file.buffer, 'application/zip');
+    return this.prisma.codingAssignment.update({
+      where: { id },
+      data: { starterFileUrl: `/api/coding/assignments/${id}/starter` },
+      select: { id: true, starterFileUrl: true },
+    });
+  }
+
+  /** Read the starter only after assignment access has been checked. */
+  async getStarter(user: JwtPayload, id: string) {
+    const assignment = await this.get(user, id);
+    if (user.role === Role.STUDENT && assignment.status === CodingAssignmentStatus.DRAFT) {
+      throw new NotFoundException('Starter template not available');
+    }
+    if (!assignment.starterFileUrl) throw new NotFoundException('This task has no starter template');
+    const archive = await this.storage.get(starterKey(id));
+    if (!archive) throw new NotFoundException('Starter template is unavailable');
+    return archive;
+  }
 
   /** Assigned instructor or org admin authors a coding assignment. A LIVE-kind
    *  task tied to a session opens immediately and is broadcast to the room. */
@@ -51,7 +117,7 @@ export class CodingService {
     // is refused, so an assignment set as homework could never reach a student
     // at all. Only a LIVE task with no session still drafts, because it has no
     // room to be announced in yet.
-    const open = launchLive || kind === CodingAssignmentKind.ASSIGNMENT;
+    const open = !dto.deferLaunch && (launchLive || kind === CodingAssignmentKind.ASSIGNMENT);
 
     // A timed live task counts down from launch: its deadline is now + limit.
     // An untimed task (or an assignment) keeps the explicit dueAt if given.
@@ -102,7 +168,7 @@ export class CodingService {
       include: fullInclude,
     });
 
-    if (launchLive) await this.live.broadcastTask(assignment.id);
+    if (launchLive && open) await this.live.broadcastTask(assignment.id);
     return assignment;
   }
 
@@ -255,6 +321,7 @@ export class CodingService {
       language: a.language,
       framework: a.framework,
       difficulty: a.difficulty,
+      workspacePath: a.workspacePath,
       courseId: a.courseId,
       courseTitle: a.course.title,
       sessionId: a.sessionId,
@@ -450,3 +517,7 @@ const fullInclude = {
   requirements: { orderBy: { order: 'asc' } },
   rubric: { orderBy: { order: 'asc' } },
 } satisfies Prisma.CodingAssignmentInclude;
+
+function starterKey(id: string): string {
+  return `coding/starters/${id}.zip`;
+}

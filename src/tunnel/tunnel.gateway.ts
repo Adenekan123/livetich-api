@@ -11,6 +11,7 @@ import {
 import { SkipThrottle } from '@nestjs/throttler';
 import { Role, SessionStatus, UserStatus } from '@prisma/client';
 import type { Server, Socket } from 'socket.io';
+import { WebSocket } from 'ws';
 import { AuthCacheService } from '../auth/auth-cache.service';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { PrismaService } from '../prisma/prisma.service';
@@ -50,6 +51,11 @@ type TunnelSocket = Socket<
 export class TunnelGateway
   implements OnGatewayConnection, OnGatewayDisconnect
 {
+  private readonly previewSockets = new Map<
+    string,
+    { socket: WebSocket; hostSocketId: string }
+  >();
+
   @WebSocketServer()
   server!: TunnelServer;
 
@@ -94,6 +100,12 @@ export class TunnelGateway
   }
 
   async handleDisconnect(client: TunnelSocket) {
+    for (const [bridgeId, bridge] of this.previewSockets) {
+      if (bridge.hostSocketId === client.id) {
+        bridge.socket.close(1011, 'Instructor tunnel disconnected');
+        this.previewSockets.delete(bridgeId);
+      }
+    }
     const removed = this.tunnelService.cleanupSocket(client.id);
     for (const r of removed) {
       const ports = this.tunnelService.getPortsForSession(r.sessionId);
@@ -134,8 +146,20 @@ export class TunnelGateway
       return this.fail(client, 'FORBIDDEN', 'Code Instruction is not enabled');
     }
 
-    if (user.role === Role.INSTRUCTOR) {
-      if (session.course.instructorId !== user.sub) {
+    const isAdmin =
+      user.role === Role.ORG_ADMIN || (user.role as string) === 'SUPER_ADMIN';
+    if (isAdmin) {
+      if (
+        session.course.organizationId !== user.organizationId &&
+        (user.role as string) !== 'SUPER_ADMIN'
+      ) {
+        return this.fail(client, 'FORBIDDEN', 'Not your organization');
+      }
+    } else if (user.role === Role.INSTRUCTOR) {
+      if (
+        session.course.instructorId !== user.sub &&
+        session.course.organizationId !== user.organizationId
+      ) {
         return this.fail(client, 'FORBIDDEN', 'Not your session');
       }
     } else {
@@ -251,6 +275,45 @@ export class TunnelGateway
     this.tunnelService.handleResponseError(p.reqId, p.message);
   }
 
+  @SubscribeMessage('tunnel:ws:ready')
+  onPreviewWsReady(
+    @ConnectedSocket() client: TunnelSocket,
+    @MessageBody() p: { bridgeId: string; ok: boolean; message?: string },
+  ) {
+    const bridge = this.previewSockets.get(p.bridgeId);
+    if (!bridge || bridge.hostSocketId !== client.id || p.ok) return;
+    bridge.socket.close(1011, 'The instructor app could not open this WebSocket');
+    this.previewSockets.delete(p.bridgeId);
+  }
+
+  @SubscribeMessage('tunnel:ws:message')
+  onPreviewWsMessage(
+    @ConnectedSocket() client: TunnelSocket,
+    @MessageBody() p: { bridgeId: string; data: string; isBinary: boolean },
+  ) {
+    const bridge = this.previewSockets.get(p.bridgeId);
+    if (!bridge || bridge.hostSocketId !== client.id || bridge.socket.readyState !== WebSocket.OPEN) return;
+    if (bridge.socket.bufferedAmount > 1024 * 1024) {
+      bridge.socket.close(1013, 'Preview is sending data too quickly');
+      this.previewSockets.delete(p.bridgeId);
+      return;
+    }
+    bridge.socket.send(Buffer.from(p.data, 'base64'), { binary: p.isBinary });
+  }
+
+  @SubscribeMessage('tunnel:ws:closed')
+  onPreviewWsClosed(
+    @ConnectedSocket() client: TunnelSocket,
+    @MessageBody() p: { bridgeId: string; code: number; reason?: string },
+  ) {
+    const bridge = this.previewSockets.get(p.bridgeId);
+    if (!bridge || bridge.hostSocketId !== client.id) return;
+    this.previewSockets.delete(p.bridgeId);
+    if (bridge.socket.readyState === WebSocket.OPEN) {
+      bridge.socket.close(this.safeCloseCode(p.code), p.reason?.slice(0, 120));
+    }
+  }
+
   // --- Dispatching HTTP request to host extension ---
 
   sendHttpRequest(
@@ -273,10 +336,46 @@ export class TunnelGateway
     this.server.to(hostSocketId).emit('tunnel:abort', { reqId });
   }
 
+  connectPreviewWebSocket(
+    hostSocketId: string,
+    bridgeId: string,
+    port: number,
+    path: string,
+    socket: WebSocket,
+  ): void {
+    this.previewSockets.set(bridgeId, { socket, hostSocketId });
+    this.server.to(hostSocketId).emit('tunnel:ws:connect', { bridgeId, port, path });
+    socket.on('message', (data, isBinary) => {
+      this.server.to(hostSocketId).emit('tunnel:ws:message', {
+        bridgeId,
+        data: Buffer.from(data as Buffer).toString('base64'),
+        isBinary,
+      });
+    });
+    socket.on('close', (code, reason) => {
+      this.previewSockets.delete(bridgeId);
+      this.server.to(hostSocketId).emit('tunnel:ws:close', {
+        bridgeId,
+        code: this.safeCloseCode(code),
+        reason: reason.toString('utf8').slice(0, 120),
+      });
+    });
+    socket.on('error', () => {
+      if (socket.readyState === WebSocket.OPEN) socket.close(1011, 'Preview WebSocket failed');
+    });
+  }
+
   private inRoom(client: TunnelSocket, sessionId: string): boolean {
     if (client.data.sessionIds?.has(sessionId)) return true;
     this.fail(client, 'NOT_IN_ROOM', 'Join the tunnel room first');
     return false;
+  }
+
+  private safeCloseCode(code: number): number {
+    return [1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014].includes(code) ||
+      (code >= 3000 && code <= 4999)
+      ? code
+      : 1000;
   }
 
   private fail(client: TunnelSocket, code: string, message: string) {

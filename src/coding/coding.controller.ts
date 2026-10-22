@@ -96,6 +96,29 @@ export class CodingController {
     return this.coding.get(user, id);
   }
 
+  /** Upload or replace a task starter while the task is still a draft. */
+  @Post('assignments/:id/starter')
+  @UseInterceptors(
+    FileInterceptor('file', { limits: { fileSize: MAX_ARCHIVE_BYTES } }),
+  )
+  uploadStarter(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @UploadedFile() file: UploadedBlob,
+  ) {
+    return this.coding.uploadStarter(user, id, file);
+  }
+
+  /** Enrolled students and course managers can download the task starter. */
+  @Get('assignments/:id/starter')
+  async starter(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    const archive = await this.coding.getStarter(user, id);
+    return new StreamableFile(archive, {
+      type: 'application/zip',
+      disposition: `attachment; filename="starter-${id}.zip"`,
+    });
+  }
+
   @Patch('assignments/:id')
   update(
     @CurrentUser() user: JwtPayload,
