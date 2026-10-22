@@ -11,6 +11,7 @@ import { AuthCacheService } from '../auth/auth-cache.service';
 import { AuthService } from '../auth/auth.service';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { AuditAction, AuditService } from '../observability/audit.service';
+import { isConfiguredPlatformAdminEmail } from './platform-admin-policy';
 
 /** Who did an admin action + client context, for the audit trail. */
 export interface ActorCtx {
@@ -149,7 +150,16 @@ export class AdminService {
       }),
     ]);
 
-    return { total, page, pageSize, rows };
+    return {
+      total,
+      page,
+      pageSize,
+      rows: rows.map((user) => ({
+        ...user,
+        isSuperAdmin:
+          user.isSuperAdmin && isConfiguredPlatformAdminEmail(user.email),
+      })),
+    };
   }
 
   private async getUserOr404(userId: string) {
@@ -184,6 +194,11 @@ export class AdminService {
 
   async setSuperAdmin(ctx: ActorCtx, userId: string, value: boolean) {
     const user = await this.getUserOr404(userId);
+    if (value && !isConfiguredPlatformAdminEmail(user.email)) {
+      throw new ForbiddenException(
+        'Only the configured platform-admin account can be granted access',
+      );
+    }
     if (user.id === ctx.actor.sub && !value) {
       throw new BadRequestException(
         'You cannot revoke your own platform-admin access',

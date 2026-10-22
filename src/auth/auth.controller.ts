@@ -13,6 +13,7 @@ import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { AuditAction, AuditService, clientIp } from '../observability/audit.service';
 import { AuthService } from './auth.service';
+import { isConfiguredPlatformAdminEmail } from '../admin/platform-admin-policy';
 import { QuickAccessService } from './quick-access.service';
 import { TurnstileService } from './turnstile.service';
 import { CurrentUser } from './current-user.decorator';
@@ -230,7 +231,11 @@ export class AuthController {
   @AllowUnverified()
   @Get('me')
   me(@CurrentUser() user: JwtPayload) {
-    return user;
+    return {
+      ...user,
+      isSuperAdmin:
+        user.isSuperAdmin && isConfiguredPlatformAdminEmail(user.email),
+    };
   }
 
   /** Workspaces this account can act in — for the workspace switcher. */

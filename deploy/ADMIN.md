@@ -7,7 +7,8 @@ A cross-org operator console at **`/admin`** (web), gated to users with the
   submissions, and AI spend/tokens (today + last 30 days).
 - **Users** — every user across all orgs, with search/filter and actions:
   disable/enable, send reset link, force-verify email, change role,
-  grant/revoke super-admin, and impersonate. Every action is audit-logged.
+  and impersonate. Every action is audit-logged. The Users screen cannot grant
+  platform-admin access.
 - **Audit log** — immutable trail of security/admin events, filterable.
 - **AI usage** — token + estimated-cost breakdown by model, feature, and org,
   with a daily trend.
@@ -15,8 +16,10 @@ A cross-org operator console at **`/admin`** (web), gated to users with the
 ## Granting the first super-admin (bootstrap)
 
 `isSuperAdmin` is deliberately **not** a role and can't be obtained through
-signup — you set the first one manually, then that operator can grant others
-from the Users page.
+signup. API access additionally requires the account email to match the single
+allowlisted address in `src/admin/platform-admin-policy.ts`. The allowlist is
+`mr.nekan123@gmail.com`; other accounts are denied even if their database flag
+is accidentally set.
 
 ### Production (Docker) — SQL one-liner
 
@@ -29,7 +32,9 @@ docker compose --env-file deploy/.env.prod -f docker-compose.prod.yml exec mysql
   -e "UPDATE User SET isSuperAdmin=1 WHERE email='"'"'you@example.com'"'"';"'
 ```
 
-Replace `you@example.com`. To revoke, set `isSuperAdmin=0`.
+Use `mr.nekan123@gmail.com` as the email. The API still denies every other
+address even if its database flag is set. To remove dashboard access from the
+allowlisted account, set its `isSuperAdmin` flag to `0`.
 
 > The existing session token still works after this, but the `/admin` link only
 > appears after the flag is in the token — **sign out and back in once** to pick
