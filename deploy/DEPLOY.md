@@ -13,9 +13,13 @@ storage stay on the internal Docker network with data in named volumes.
                                                      └─▶ storage volume
 ```
 
-Good for the pilot and early production on **one** instance. Scaling past one API
-instance later needs a Redis-backed throttle store and `y-redis` for the board
-(both noted in the security roadmap) — not required here.
+This deployment intentionally runs **one API instance**. The chalkboard keeps a
+Yjs document and the student-write switch in process memory; the Redis socket
+adapter distributes socket messages but does not make those board documents
+shared. The Compose API service has a fixed container name so an accidental
+`--scale api=2` is rejected instead of splitting chalkboard state. Before
+removing that guard or adding API replicas, move the board document and write
+permission state to a shared Yjs provider (and the HTTP throttler to Redis).
 
 ---
 
@@ -36,10 +40,16 @@ Hetzner **Cloud Firewall** allow inbound **22** (ideally only your IP), **80**,
 (`wss://<you>.livekit.cloud`), **API key**, **API secret** → these become
 `LIVEKIT_URL/KEY/SECRET` in step (e). Leave the compose `livekit` profile OFF.
 
-**c. DNS (Cloudflare).** Add A records `app` and `api` → the server IP. Set both
-to **DNS-only (grey cloud)** for now so Caddy can get Let's Encrypt certs via the
-HTTP challenge. (You can switch to proxied/orange later with SSL mode
-*Full (strict)*.)
+**c. DNS (Cloudflare).** Add A records `app` and `api` → the server IP, plus a
+wildcard A record `*.preview` → the same server. Set the app/API records to
+**DNS-only (grey cloud)** for Let's Encrypt HTTP challenges. The preview wildcard
+can be proxied or DNS-only; Caddy obtains its single wildcard certificate with
+Cloudflare DNS validation. Create a Cloudflare API token scoped to this zone with
+**Zone / DNS / Edit**, then set `PREVIEW_DOMAIN=preview.livetich.com` and
+`CF_API_TOKEN` in the deployment environment. Previews use names such as
+`<session-id>-3000.preview.livetich.com`; all of them route through the same API
+and instructor tunnel. For staging, use `preview-staging.livetich.com` and its
+matching wildcard DNS record.
 
 **d. Install Docker + clone.**
 ```bash
