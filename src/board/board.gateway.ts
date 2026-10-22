@@ -63,6 +63,11 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
   /** Sessions where the instructor has opened the board for students to draw. */
   private readonly writable = new Set<string>();
 
+  /** Used by the asset endpoint to apply the same student-write gate as Yjs. */
+  isWritable(sessionId: string): boolean {
+    return this.writable.has(sessionId);
+  }
+
   /** The presenter's most recent view per session (camera/page/bounds). The
    *  presenter only broadcasts board:presenter when its view *changes*, so a
    *  client that joins during a lull (instructor paused, not panning/drawing)
@@ -138,8 +143,15 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
 
     const account = await this.authCache.getState(user.sub);
-    if (!account || account.status === UserStatus.DISABLED || !account.emailVerified) {
-      client.emit('error', { code: 'FORBIDDEN', message: 'Account not permitted' });
+    if (
+      !account ||
+      account.status === UserStatus.DISABLED ||
+      !account.emailVerified
+    ) {
+      client.emit('error', {
+        code: 'FORBIDDEN',
+        message: 'Account not permitted',
+      });
       client.disconnect(true);
       return false;
     }
@@ -374,7 +386,7 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
   }
 
-  private toBytes(data: BoardBinary | unknown): Uint8Array | null {
+  private toBytes(data: unknown): Uint8Array | null {
     if (data instanceof Uint8Array) return data; // Node Buffer included
     if (data instanceof ArrayBuffer) return new Uint8Array(data);
     // Any typed-array / DataView view over a buffer.
@@ -406,8 +418,7 @@ export class BoardGateway implements OnGatewayConnection, OnGatewayDisconnect {
    *  A plain (shadow) admin and un-invited students stay read-only. */
   private canPresent(client: BoardSocket): boolean {
     return (
-      client.data.user.role === Role.INSTRUCTOR ||
-      client.data.teaching === true
+      client.data.user.role === Role.INSTRUCTOR || client.data.teaching === true
     );
   }
 

@@ -8,12 +8,17 @@
  * this script — use the SQL one-liner in deploy/ADMIN.md instead.
  */
 import { PrismaClient } from '@prisma/client';
+import { isConfiguredPlatformAdminEmail } from '../src/admin/platform-admin-policy';
 
 async function main() {
   const email = process.argv[2];
   const revoke = process.argv.includes('--revoke');
   if (!email) {
     console.error('Usage: pnpm admin:grant <email> [--revoke]');
+    process.exit(1);
+  }
+  if (!isConfiguredPlatformAdminEmail(email)) {
+    console.error('This script only changes the configured platform-admin account');
     process.exit(1);
   }
 

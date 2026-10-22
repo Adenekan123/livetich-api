@@ -1,7 +1,8 @@
-import { Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
 import { CurrentUser } from '../../auth/current-user.decorator';
 import type { JwtPayload } from '../../auth/jwt-payload';
 import { PLUGIN_CODE_INSTRUCTION } from '../../plugins/catalog';
+import { CourseUpdateAckDto } from './dto/course-update.dto';
 import {
   RequirePlugin,
   RequirePluginGuard,
@@ -57,5 +58,24 @@ export class CodingWorkspaceController {
     @Param('enrollmentId') enrollmentId: string,
   ): Promise<WorkspaceView> {
     return this.workspaces.start(user, enrollmentId);
+  }
+
+  /** Latest instructor checkpoint and a safe file-by-file update plan. */
+  @Get(':enrollmentId/course-update')
+  courseUpdate(
+    @CurrentUser() user: JwtPayload,
+    @Param('enrollmentId') enrollmentId: string,
+  ) {
+    return this.workspaces.courseUpdate(user, enrollmentId);
+  }
+
+  /** Acknowledge an update after the student has saved it to their repo. */
+  @Post(':enrollmentId/course-update/ack')
+  acknowledgeCourseUpdate(
+    @CurrentUser() user: JwtPayload,
+    @Param('enrollmentId') enrollmentId: string,
+    @Body() dto: CourseUpdateAckDto,
+  ) {
+    return this.workspaces.acknowledgeCourseUpdate(user, enrollmentId, dto);
   }
 }

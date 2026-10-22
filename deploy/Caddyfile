@@ -57,8 +57,16 @@
 	}
 }
 
+# One wildcard certificate and one shared API proxy serve all active class
+# previews. Every forwarded port gets a distinct origin under PREVIEW_DOMAIN.
+*.{$PREVIEW_DOMAIN} {
+	tls {
+		dns cloudflare {env.CF_API_TOKEN}
+	}
+	reverse_proxy api:3000
+}
+
 # Legacy domain redirect (pilot domain -> official domain)
 livetich.nekan.dev {
 	redir https://livetich.com{uri} permanent
 }
-

@@ -498,25 +498,37 @@ export class GitHubConnectionService {
     const connections = orgIds.length
       ? await this.prisma.gitHubOrganizationConnection.findMany({
           where: { organizationId: { in: orgIds } },
-          select: { organizationId: true, status: true },
+          select: {
+            organizationId: true,
+            status: true,
+            githubOrganizationLogin: true,
+          },
         })
       : [];
-    const live = new Map(
-      connections.map((c) => [
-        c.organizationId,
-        c.status === GitHubConnectionStatus.ACTIVE,
-      ]),
+    const connectionsByOrg = new Map(
+      connections.map((connection) => [connection.organizationId, connection]),
     );
 
-    return programs.map((p) => ({
-      courseId: p.id,
-      title: p.title,
-      code: p.code,
-      templateRepositoryName: p.gitConfig?.templateRepositoryName ?? null,
-      defaultBranch: p.gitConfig?.defaultBranch ?? 'main',
-      submissionMode: p.codingSubmissionMode,
-      configured: Boolean(p.gitConfig),
-      connected: p.organizationId ? (live.get(p.organizationId) ?? false) : false,
-    }));
+    return programs.map((p) => {
+      const connection = p.organizationId
+        ? connectionsByOrg.get(p.organizationId)
+        : undefined;
+      const templateRepositoryName =
+        p.gitConfig?.templateRepositoryName ?? null;
+      return {
+        courseId: p.id,
+        title: p.title,
+        code: p.code,
+        templateRepositoryName,
+        templateRepositoryFullName:
+          connection && templateRepositoryName
+            ? `${connection.githubOrganizationLogin}/${templateRepositoryName}`
+            : null,
+        defaultBranch: p.gitConfig?.defaultBranch ?? 'main',
+        submissionMode: p.codingSubmissionMode,
+        configured: Boolean(p.gitConfig),
+        connected: connection?.status === GitHubConnectionStatus.ACTIVE,
+      };
+    });
   }
 }

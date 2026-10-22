@@ -114,9 +114,10 @@ async function main() {
 
   const sGotCode = waitFor(sSock, 'code:update');
   const sampleCode = 'function calculateFibonacci(n) {\n  return n <= 1 ? n : calculateFibonacci(n - 1) + calculateFibonacci(n - 2);\n}\n';
-  iDoc.getText('code').insert(0, sampleCode);
+  const filePath = 'src/lesson.ts';
+  iDoc.getText(`file:${filePath}`).insert(0, sampleCode);
   Y.applyUpdate(sDoc, bytes((await sGotCode).update));
-  check('Live Code Sync: Student receives instructor code edits', sDoc.getText('code').toString().includes('calculateFibonacci'));
+  check('Live Code Sync: Student receives instructor code edits', sDoc.getText(`file:${filePath}`).toString().includes('calculateFibonacci'));
 
   // Language change sync
   const sGotLang = waitFor(sSock, 'code:update');
@@ -127,7 +128,7 @@ async function main() {
   // Read-only enforcement for student
   const readonly = waitFor(sSock, 'error', (e) => e.code === 'FORBIDDEN');
   const rogueDoc = new Y.Doc();
-  rogueDoc.getText('code').insert(0, 'student_unauthorized_edit();\n');
+  rogueDoc.getText('file:src/rogue.ts').insert(0, 'student_unauthorized_edit();\n');
   sSock.emit('code:update', { sessionId: setup.codeSessionId, update: Y.encodeStateAsUpdate(rogueDoc) });
   const roErr = await readonly;
   check('Read-only Enforcement: Student writes to shared editor are rejected', /read-only/i.test(roErr.message), roErr.message);
@@ -144,7 +145,7 @@ async function main() {
   Y.applyUpdate(reloaded, bytes((await rejoin).update));
   check(
     'Persistence: Buffer & language survive when participants leave and return',
-    reloaded.getText('code').toString().includes('calculateFibonacci') && reloaded.getMap('meta').get('lang') === 'javascript'
+    reloaded.getText(`file:${filePath}`).toString().includes('calculateFibonacci') && reloaded.getMap('meta').get('lang') === 'javascript'
   );
 
   iSock.disconnect();
@@ -163,6 +164,9 @@ async function main() {
 
   // Create Coding Assignment
   const newAssignment = await req('POST', `/coding/courses/${setup.codeCourseId}/assignments`, instructorToken, {
+    kind: 'LIVE',
+    sessionId: setup.codeSessionId,
+    deferLaunch: true,
     title: 'Algorithm Sprint: Binary Search Tree',
     description: 'Implement insert, search, and inorder traversal in TypeScript. Submit as a zip or via VSCode.',
     language: 'typescript',
@@ -179,14 +183,52 @@ async function main() {
       { criterion: 'Code Quality & Typing', weight: 40 },
     ],
   });
-  check('Create Coding Assignment: Successfully created with rubric & requirements', newAssignment.ok && newAssignment.data?.id, JSON.stringify(newAssignment.data ?? newAssignment.text));
+  check('Create Coding Assignment: Starter-backed task is saved as a hidden draft', newAssignment.ok && newAssignment.data?.id && newAssignment.data?.status === 'DRAFT', JSON.stringify(newAssignment.data ?? newAssignment.text));
   const codingAssignmentId = newAssignment.data?.id;
+
+  // Attach a template before publishing so students cannot open a task whose
+  // starter archive is still in flight.
+  const starterZip = new AdmZip();
+  const starterFiles = {
+    'src/bst.ts': 'export class BinarySearchTree<T> {\n  // TODO: implement insert, search, and inorder traversal\n}\n',
+    'README.md': '# Binary Search Tree\n\nComplete the TODOs before submitting.\n',
+  };
+  for (const [path, content] of Object.entries(starterFiles)) {
+    starterZip.addFile(path, Buffer.from(content));
+  }
+  const starterForm = new FormData();
+  starterForm.append('file', new Blob([starterZip.toBuffer()], { type: 'application/zip' }), 'bst-starter.zip');
+  const starterUpload = await fetch(`${API}/coding/assignments/${codingAssignmentId}/starter`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${instructorToken}` },
+    body: starterForm,
+  });
+  const starterUploadData = await starterUpload.json();
+  check('Starter Template: Instructor uploads the project archive to the draft', starterUpload.ok && !!starterUploadData?.starterFileUrl);
+
+  const unauthStarter = await fetch(`${API}/coding/assignments/${codingAssignmentId}/starter`);
+  check('Starter Access: Unauthenticated download is rejected', unauthStarter.status === 401);
+  const hiddenStarter = await fetch(`${API}/coding/assignments/${codingAssignmentId}/starter`, {
+    headers: { Authorization: `Bearer ${studentToken}` },
+  });
+  check('Starter Access: Student cannot download before task launch', hiddenStarter.status === 404);
 
   // Launch assignment to live session
   const launched = await req('POST', `/coding/assignments/${codingAssignmentId}/launch`, instructorToken, {
     sessionId: setup.codeSessionId,
   });
   check('Launch Assignment: Instructor launches coding task to live session', launched.ok && launched.data?.sessionId === setup.codeSessionId);
+
+  const studentTask = await req('GET', `/coding/assignments/${codingAssignmentId}`, studentToken);
+  check('Student Task: Student receives starter metadata after launch', studentTask.ok && studentTask.data?.starterFileUrl);
+  const downloadedStarter = await fetch(`${API}/coding/assignments/${codingAssignmentId}/starter`, {
+    headers: { Authorization: `Bearer ${studentToken}` },
+  });
+  const downloadedStarterZip = new AdmZip(Buffer.from(await downloadedStarter.arrayBuffer()));
+  const downloadedNames = downloadedStarterZip.getEntries().filter((entry) => !entry.isDirectory).map((entry) => entry.entryName).sort();
+  const starterMatches = downloadedNames.length === Object.keys(starterFiles).length &&
+    Object.entries(starterFiles).every(([path, content]) => downloadedStarterZip.readAsText(path) === content);
+  check('Student Starter: Enrolled student downloads the intact template files', downloadedStarter.ok && starterMatches, downloadedNames.join(', '));
 
   // Student views assignment list (now that it is LIVE, student sees it)
   const mine = await req('GET', '/coding/mine', studentToken);

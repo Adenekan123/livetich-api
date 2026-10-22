@@ -91,6 +91,11 @@ export class CreateCodingAssignmentDto {
   @IsString()
   sessionId?: string;
 
+  /** Create closed to students until an optional starter archive is attached. */
+  @IsOptional()
+  @IsBoolean()
+  deferLaunch?: boolean;
+
   /**
    * Where this task's work lives inside the student's course repository, e.g.
    * "assignments/todo-api" or "live-exercises/lesson-07-navbar" (§18, §20).

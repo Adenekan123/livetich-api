@@ -59,6 +59,7 @@
     "resend": "^6.18.1",
     "rxjs": "^7.8.1",
     "socket.io": "^4.8.0",
+    "ws": "^8.21.1",
     "yjs": "^13.6.31",
     "zod": "^4.4.3"
   },
@@ -77,6 +78,7 @@
     "@types/pdf-parse": "^1.1.5",
     "@types/pdfkit": "^0.17.6",
     "@types/qrcode": "^1.5.6",
+    "@types/ws": "^8.18.1",
     "@types/supertest": "^7.0.0",
     "eslint": "^9.18.0",
     "eslint-config-prettier": "^10.0.1",

@@ -4,6 +4,8 @@ import {
   Controller,
   ForbiddenException,
   Get,
+  HttpException,
+  HttpStatus,
   Inject,
   NotFoundException,
   Param,
@@ -12,16 +14,20 @@ import {
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { AllowRecorder } from '../auth/jwt-auth.guard';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { Role } from '@prisma/client';
+import { Role, SessionStatus } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
+import Redis from 'ioredis';
 import { CurrentUser } from '../auth/current-user.decorator';
 import type { JwtPayload } from '../auth/jwt-payload';
 import { PrismaService } from '../prisma/prisma.service';
 import { googleExportUrl } from './google-export';
 import { OBJECT_STORAGE } from '../storage/object-storage';
 import type { ObjectStorage } from '../storage/object-storage';
+import { REDIS } from '../redis/redis.module';
+import { BoardGateway } from '../board/board.gateway';
 
 interface UploadedBlob {
   buffer: Buffer;
@@ -32,11 +38,45 @@ interface UploadedBlob {
 /** Rasterised PDF pages / pasted images. Generous vs. voice, capped so one
  *  slide can't blow up the store or a socket message. */
 const MAX_ASSET_BYTES = 20 * 1024 * 1024; // 20 MB
+const MAX_SESSION_ASSETS = 120;
+const MAX_SESSION_ASSET_BYTES = 150 * 1024 * 1024;
 const assetKey = (id: string) => `board-asset/${id}`;
-// The store can't hand back a content-type on read, so persist it beside the
-// blob and replay it on serve (falls back to PNG — the web rasterises to PNG).
 const typeKey = (id: string) => `board-asset/${id}.ct`;
+const sessionKey = (id: string) => `board-asset/${id}.session`;
 const DEFAULT_TYPE = 'image/png';
+
+function verifiedImageType(file: UploadedBlob): string | null {
+  const bytes = file.buffer;
+  const type = file.mimetype.toLowerCase();
+  if (
+    type === 'image/png' &&
+    bytes.length >= 8 &&
+    bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+  )
+    return 'image/png';
+  if (
+    type === 'image/jpeg' &&
+    bytes.length >= 3 &&
+    bytes[0] === 0xff &&
+    bytes[1] === 0xd8 &&
+    bytes[2] === 0xff
+  )
+    return 'image/jpeg';
+  if (
+    type === 'image/gif' &&
+    (bytes.subarray(0, 6).toString('ascii') === 'GIF87a' ||
+      bytes.subarray(0, 6).toString('ascii') === 'GIF89a')
+  )
+    return 'image/gif';
+  if (
+    type === 'image/webp' &&
+    bytes.length >= 12 &&
+    bytes.subarray(0, 4).toString('ascii') === 'RIFF' &&
+    bytes.subarray(8, 12).toString('ascii') === 'WEBP'
+  )
+    return 'image/webp';
+  return null;
+}
 
 /**
  * Board image assets for the shared chalkboard. When the instructor imports a
@@ -53,6 +93,8 @@ export class BoardAssetController {
   constructor(
     private readonly prisma: PrismaService,
     @Inject(OBJECT_STORAGE) private readonly storage: ObjectStorage,
+    @Inject(REDIS) private readonly redis: Redis,
+    private readonly board: BoardGateway,
   ) {}
 
   @Post('sessions/:id/board-asset')
@@ -65,22 +107,76 @@ export class BoardAssetController {
     @UploadedFile() file?: UploadedBlob,
   ) {
     if (!file) throw new BadRequestException('No image received');
-    if (!file.mimetype.startsWith('image/')) {
-      throw new BadRequestException('Board assets must be images');
-    }
     if (file.size > MAX_ASSET_BYTES) {
       throw new BadRequestException('Board image is larger than 20 MB');
     }
-    await this.assertParticipant(user, sessionId);
+    const contentType = verifiedImageType(file);
+    if (!contentType) {
+      throw new BadRequestException('Use a PNG, JPEG, GIF, or WebP image');
+    }
+    const session = await this.assertParticipant(user, sessionId);
+    if (session.status === SessionStatus.ENDED) {
+      throw new ForbiddenException('Cannot add images to an ended class');
+    }
+    if (user.role === Role.STUDENT && !this.board.isWritable(sessionId)) {
+      throw new ForbiddenException(
+        'The instructor has not opened the board for student edits',
+      );
+    }
+
+    // Reserve limits atomically across API instances. This caps one class at
+    // 120 assets / 150 MB even if an enrolled client automates uploads.
+    const reserved = await this.redis.eval(
+      `local count = redis.call('INCR', KEYS[1])
+       local bytes = redis.call('INCRBY', KEYS[2], ARGV[1])
+       if count > tonumber(ARGV[2]) or bytes > tonumber(ARGV[3]) then
+         redis.call('DECR', KEYS[1])
+         redis.call('DECRBY', KEYS[2], ARGV[1])
+         return 0
+       end
+       return 1`,
+      2,
+      `board:asset-count:${sessionId}`,
+      `board:asset-bytes:${sessionId}`,
+      String(file.size),
+      String(MAX_SESSION_ASSETS),
+      String(MAX_SESSION_ASSET_BYTES),
+    );
+    if (Number(reserved) !== 1) {
+      throw new HttpException(
+        'This class has reached its board image limit',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
 
     const id = randomUUID();
-    await this.storage.put(assetKey(id), file.buffer, file.mimetype);
-    await this.storage.put(
-      typeKey(id),
-      Buffer.from(file.mimetype, 'utf8'),
-      'text/plain',
-    );
-    return { url: `/api/files/board-asset/${id}` };
+    try {
+      // Index first so retention cleanup can find a partially written asset if
+      // the API process stops between object-store writes.
+      await this.redis.sadd(`board:assets:${sessionId}`, id);
+      await this.storage.put(assetKey(id), file.buffer, contentType);
+      await this.storage.put(
+        typeKey(id),
+        Buffer.from(contentType, 'utf8'),
+        'text/plain',
+      );
+      await this.storage.put(
+        sessionKey(id),
+        Buffer.from(sessionId, 'utf8'),
+        'text/plain',
+      );
+      return { url: `/api/files/board-asset/${sessionId}/${id}` };
+    } catch (error) {
+      await Promise.allSettled([
+        this.storage.delete(assetKey(id)),
+        this.storage.delete(typeKey(id)),
+        this.storage.delete(sessionKey(id)),
+        this.redis.srem(`board:assets:${sessionId}`, id),
+        this.redis.decr(`board:asset-count:${sessionId}`),
+        this.redis.decrby(`board:asset-bytes:${sessionId}`, file.size),
+      ]);
+      throw error;
+    }
   }
 
   /**
@@ -110,7 +206,10 @@ export class BoardAssetController {
         'That link cannot be imported. Use a Google Doc, Sheet, Slides or Drive file.',
       );
     }
-    await this.assertParticipant(user, sessionId);
+    const session = await this.assertParticipant(user, sessionId);
+    if (session.status === SessionStatus.ENDED) {
+      throw new ForbiddenException('Cannot import files into an ended class');
+    }
 
     let res: Response;
     try {
@@ -150,13 +249,48 @@ export class BoardAssetController {
    * session: an image or PDF on the board is part of the lesson, and without
    * this a recording shows empty frames where the slides were.
    */
+  @Throttle({ default: { limit: 600, ttl: 60_000 } })
   @AllowRecorder()
-  @Get('files/board-asset/:id')
-  async serve(@Param('id') id: string) {
-    const stream = await this.storage.getStream(assetKey(id));
-    if (!stream) throw new NotFoundException('Board asset not found');
+  @Get('files/board-asset/:sessionId/:id')
+  async serve(
+    @CurrentUser() user: JwtPayload,
+    @Param('sessionId') sessionId: string,
+    @Param('id') id: string,
+  ) {
+    if (user.recorder) {
+      if (user.recorder.sessionId !== sessionId) {
+        throw new ForbiddenException('Recorder cannot access another session');
+      }
+    } else {
+      await this.assertParticipant(user, sessionId);
+    }
+
+    const assetSize = await this.storage.size(assetKey(id));
+    if (assetSize === null)
+      throw new NotFoundException('Board asset not found');
+    const owner = await this.storage.get(sessionKey(id));
+    if (owner && owner.toString('utf8') !== sessionId) {
+      throw new NotFoundException('Board asset not found');
+    }
+    // First read of an asset from an older board snapshot binds its opaque id
+    // to the session that supplied the URL. Future reads are session checked.
+    if (!owner) {
+      await this.redis.sadd(`board:assets:${sessionId}`, id);
+      await this.storage.put(
+        sessionKey(id),
+        Buffer.from(sessionId, 'utf8'),
+        'text/plain',
+      );
+    }
     const ct = await this.storage.get(typeKey(id));
     const type = ct ? ct.toString('utf8') : DEFAULT_TYPE;
+    if (
+      !['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(type)
+    ) {
+      throw new BadRequestException('Unsupported board image type');
+    }
+    const stream = await this.storage.getStream(assetKey(id));
+    if (!stream) throw new NotFoundException('Board asset not found');
     return new StreamableFile(stream, { type });
   }
 
@@ -165,6 +299,7 @@ export class BoardAssetController {
     const session = await this.prisma.liveSession.findUnique({
       where: { id: sessionId },
       select: {
+        status: true,
         course: {
           select: { id: true, instructorId: true, organizationId: true },
         },
@@ -173,13 +308,13 @@ export class BoardAssetController {
     if (!session) throw new NotFoundException('Session not found');
     const { course } = session;
     if (user.role === Role.INSTRUCTOR && course.instructorId === user.sub) {
-      return;
+      return session;
     }
     if (
       user.role === Role.ORG_ADMIN &&
       course.organizationId === user.organizationId
     ) {
-      return;
+      return session;
     }
     if (user.role === Role.STUDENT) {
       const enrolled = await this.prisma.enrollment.findUnique({
@@ -188,7 +323,7 @@ export class BoardAssetController {
         },
         select: { id: true },
       });
-      if (enrolled) return;
+      if (enrolled) return session;
     }
     throw new ForbiddenException('Not a participant of this session');
   }

@@ -17,6 +17,7 @@ import { CreateWorkspaceDto } from './dto/create-workspace.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { RegisterOrganizationDto } from './dto/register-organization.dto';
+import { isConfiguredPlatformAdminEmail } from '../admin/platform-admin-policy';
 import { JwtPayload } from './jwt-payload';
 import { isValidPluginKey } from '../plugins/catalog';
 
@@ -261,7 +262,11 @@ export class AuthService {
     password: string,
   ): Promise<{ stepUpToken: string }> {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
-    if (!user || !user.isSuperAdmin) {
+    if (
+      !user ||
+      !user.isSuperAdmin ||
+      !isConfiguredPlatformAdminEmail(user.email)
+    ) {
       throw new ForbiddenException('Platform admin access required');
     }
     const ok = await bcryptVerify(password, user.passwordHash);
@@ -351,7 +356,8 @@ export class AuthService {
       email: user.email,
       organizationId: user.organizationId,
       emailVerified: user.emailVerified,
-      isSuperAdmin: user.isSuperAdmin,
+      isSuperAdmin:
+        user.isSuperAdmin && isConfiguredPlatformAdminEmail(user.email),
     };
     return {
       accessToken: this.jwt.sign(payload),

@@ -7,9 +7,10 @@ import {
 import type { Request } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
 import type { JwtPayload } from '../auth/jwt-payload';
+import { isConfiguredPlatformAdminEmail } from './platform-admin-policy';
 
 /**
- * Gates the platform /admin surface to super-admins. The global JwtAuthGuard has
+ * Gates the platform /admin surface to the allowlisted super-admin. The global JwtAuthGuard has
  * already authenticated the request and set `req.user`; this guard confirms the
  * flag against the DATABASE (not just the token) so a revoked super-admin loses
  * access immediately, even while holding a still-valid 7-day token. Admin traffic
@@ -29,9 +30,9 @@ export class SuperAdminGuard implements CanActivate {
 
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { isSuperAdmin: true },
+      select: { email: true, isSuperAdmin: true },
     });
-    if (!user?.isSuperAdmin) {
+    if (!user?.isSuperAdmin || !isConfiguredPlatformAdminEmail(user.email)) {
       throw new ForbiddenException('Platform admin access required');
     }
     return true;

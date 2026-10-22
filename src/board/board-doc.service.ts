@@ -7,6 +7,7 @@ interface BoardEntry {
   doc: Y.Doc;
   dirty: boolean;
   clients: number;
+  revision: number;
 }
 
 const boardKey = (sessionId: string) => `boards/${sessionId}.bin`;
@@ -16,10 +17,10 @@ const boardKey = (sessionId: string) => `boards/${sessionId}.bin`;
  * are connected; snapshots go to object storage (local disk or R2) every
  * FLUSH_MS and when the last client leaves.
  *
- * Doc authority is per-process: with multiple gateway instances the Redis
- * adapter still fans updates out to clients everywhere, but only the
- * instance the instructor is connected to mutates and persists the doc.
- * Fine while writes are instructor-only; revisit (y-redis) if that changes.
+ * Doc authority is per-process. The production Compose deployment deliberately
+ * runs one API instance because students can also write while the instructor
+ * opens the board. Do not remove that singleton guard before switching this
+ * service to a shared Yjs provider.
  */
 @Injectable()
 export class BoardDocService implements OnModuleDestroy {
@@ -30,9 +31,7 @@ export class BoardDocService implements OnModuleDestroy {
   private readonly loading = new Map<string, Promise<BoardEntry>>();
   private readonly flushTimer: NodeJS.Timeout;
 
-  constructor(
-    @Inject(OBJECT_STORAGE) private readonly storage: ObjectStorage,
-  ) {
+  constructor(@Inject(OBJECT_STORAGE) private readonly storage: ObjectStorage) {
     this.flushTimer = setInterval(
       () => void this.flushDirty(),
       BoardDocService.FLUSH_MS,
@@ -53,9 +52,16 @@ export class BoardDocService implements OnModuleDestroy {
   async release(sessionId: string): Promise<boolean> {
     const entry = this.boards.get(sessionId);
     if (!entry) return false;
-    entry.clients -= 1;
+    entry.clients = Math.max(0, entry.clients - 1);
     if (entry.clients > 0) return false;
-    await this.flush(sessionId, entry);
+    // A failed final write must leave the dirty Y.Doc available to the periodic
+    // retry. Destroying it here made a short object-store outage permanent data
+    // loss for everything since the last successful snapshot.
+    while (entry.dirty && entry.clients === 0) {
+      // The gateway still needs to clear session-scoped UI state when the last
+      // socket leaves, even though we keep the dirty document for retry.
+      if (!(await this.flush(sessionId, entry))) return true;
+    }
     // A participant can rejoin while the last-client snapshot flush is awaiting
     // object storage. In that window retain() revives this entry; do not destroy
     // the active document after the flush completes.
@@ -70,6 +76,7 @@ export class BoardDocService implements OnModuleDestroy {
     if (!entry) return false;
     Y.applyUpdate(entry.doc, update);
     entry.dirty = true;
+    entry.revision += 1;
     return true;
   }
 
@@ -91,7 +98,12 @@ export class BoardDocService implements OnModuleDestroy {
         const doc = new Y.Doc();
         const snapshot = await this.storage.get(boardKey(sessionId));
         if (snapshot) Y.applyUpdate(doc, snapshot);
-        const entry: BoardEntry = { doc, dirty: false, clients: 0 };
+        const entry: BoardEntry = {
+          doc,
+          dirty: false,
+          clients: 0,
+          revision: 0,
+        };
         this.boards.set(sessionId, entry);
         return entry;
       })().finally(() => this.loading.delete(sessionId));
@@ -102,20 +114,30 @@ export class BoardDocService implements OnModuleDestroy {
 
   private async flushDirty() {
     for (const [sessionId, entry] of this.boards) {
-      if (entry.dirty) await this.flush(sessionId, entry);
+      if (!entry.dirty) continue;
+      const saved = await this.flush(sessionId, entry);
+      if (saved && !entry.dirty && entry.clients === 0) {
+        entry.doc.destroy();
+        if (this.boards.get(sessionId) === entry) this.boards.delete(sessionId);
+      }
     }
   }
 
-  private async flush(sessionId: string, entry: BoardEntry) {
+  private async flush(sessionId: string, entry: BoardEntry): Promise<boolean> {
+    const revision = entry.revision;
     try {
       await this.storage.put(
         boardKey(sessionId),
         Buffer.from(Y.encodeStateAsUpdate(entry.doc)),
         'application/octet-stream',
       );
-      entry.dirty = false;
+      // Do not mark clean if new edits arrived while the storage write was in
+      // flight; the next timer tick or final-release loop will save those too.
+      if (entry.revision === revision) entry.dirty = false;
+      return true;
     } catch (e) {
       this.logger.error(`Board flush failed for ${sessionId}: ${String(e)}`);
+      return false;
     }
   }
 }

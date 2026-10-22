@@ -11,7 +11,10 @@ name: livetich
 
 services:
   caddy:
-    image: caddy:2
+    image: ghcr.io/adenekan123/livetich-caddy:${DEPLOY_TAG:-prod}
+    build:
+      context: .
+      dockerfile: Dockerfile.caddy
     restart: unless-stopped
     ports:
       - "80:80"
@@ -20,6 +23,8 @@ services:
     environment:
       APP_DOMAIN: ${APP_DOMAIN}
       API_DOMAIN: ${API_DOMAIN}
+      PREVIEW_DOMAIN: ${PREVIEW_DOMAIN}
+      CF_API_TOKEN: ${CF_API_TOKEN}
       # Caddyfile references {$ACME_EMAIL}; without it the config fails to parse
       # ("wrong argument count after 'email'") and Caddy crash-loops.
       ACME_EMAIL: ${ACME_EMAIL}
@@ -74,6 +79,11 @@ services:
       - api
 
   api:
+    # Chalkboard Yjs authority and the writable flag are process-local. Keep a
+    # single API node until the board gateway is moved to a shared Yjs provider;
+    # container_name makes `docker compose --scale api=2` fail instead of
+    # silently creating split board state.
+    container_name: livetich-api-singleton
     image: ghcr.io/adenekan123/livetich-api:${DEPLOY_TAG:-prod}
     build:
       context: .

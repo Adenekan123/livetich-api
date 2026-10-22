@@ -4,5 +4,6 @@ import { BoardGateway } from './board.gateway';
 
 @Module({
   providers: [BoardGateway, BoardDocService],
+  exports: [BoardGateway],
 })
 export class BoardModule {}
