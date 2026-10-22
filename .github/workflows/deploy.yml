@@ -98,9 +98,10 @@ jobs:
             if [ "${{ env.ENVIRONMENT }}" = "production" ]; then ./deploy/backup.sh; fi
             C="docker compose --env-file deploy/.env.prod -f docker-compose.prod.yml"
             $C pull api caddy
-            # --wait blocks until the container's healthcheck (/health) passes,
-            # so a broken release fails this job instead of going quiet.
-            $C up -d --no-build --wait --wait-timeout 300 api
+            # Always recreate the API so env_file-only changes on the box are
+            # loaded during a manual redeploy, even when the image is unchanged.
+            # --wait blocks until /health passes, so a broken release fails CI.
+            $C up -d --no-build --force-recreate --wait --wait-timeout 300 api
             # Caddy's own definition lives in the compose file too (its network
             # aliases, for one). Compose recreates it only when that changed, so
             # an ordinary release leaves the edge alone.
