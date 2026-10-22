@@ -1,4 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Resend } from 'resend';
 
@@ -56,7 +60,7 @@ export class MailService {
         <p style="color:#737373;font-size:13px">If you didn't create an account,
         you can ignore this email.</p>
       </div>`;
-    await this.send(to, subject, html, `verification code for ${to}: ${code}`);
+    await this.send(to, subject, html, 'email verification code', true);
   }
 
   async sendScheduleChanged(
@@ -199,15 +203,42 @@ export class MailService {
     subject: string,
     html: string,
     devSummary: string,
+    required = false,
   ): Promise<void> {
     if (!this.resend) {
       this.logger.warn(`[mail:dev] No RESEND_API_KEY — ${devSummary}`);
+      if (required) {
+        throw new ServiceUnavailableException(
+          'Email delivery is not configured. Please try again later.',
+        );
+      }
       return;
     }
     try {
-      await this.resend.emails.send({ from: this.from, to, subject, html });
+      const response = await this.resend.emails.send({
+        from: this.from,
+        to,
+        subject,
+        html,
+      });
+      if (response.error) {
+        this.logger.error(
+          `Email provider rejected ${devSummary}: ${response.error.name} (${response.error.statusCode ?? 'unknown'}): ${response.error.message}`,
+        );
+        if (required) {
+          throw new ServiceUnavailableException(
+            'We could not send your verification code. Please try again shortly.',
+          );
+        }
+      }
     } catch (e) {
-      this.logger.error(`Failed to send email to ${to}: ${String(e)}`);
+      if (e instanceof ServiceUnavailableException) throw e;
+      this.logger.error(`Email provider request failed for ${devSummary}: ${String(e)}`);
+      if (required) {
+        throw new ServiceUnavailableException(
+          'We could not send your verification code. Please try again shortly.',
+        );
+      }
     }
   }
 }
