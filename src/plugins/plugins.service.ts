@@ -35,6 +35,19 @@ export class PluginsService {
     return row !== null;
   }
 
+  /**
+   * Resolve a pack for a specific program. Explicit program selections take
+   * precedence; older programs without pluginKeys retain the organization
+   * entitlement fallback.
+   */
+  async isEnabledForCourse(
+    course: { organizationId: string | null; pluginKeys?: unknown },
+    key: string,
+  ): Promise<boolean> {
+    if (Array.isArray(course.pluginKeys)) return course.pluginKeys.includes(key);
+    return this.isEnabled(course.organizationId, key);
+  }
+
   async enable(orgId: string, key: string) {
     if (!isValidPluginKey(key)) throw new BadRequestException('Unknown plugin');
     // Idempotent: enabling an already-on pack is a no-op.

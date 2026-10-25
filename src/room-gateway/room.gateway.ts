@@ -1147,9 +1147,6 @@ export class RoomGateway
     course: { organizationId: string | null; pluginKeys?: unknown },
     key: string,
   ): Promise<boolean> {
-    if (Array.isArray(course.pluginKeys)) {
-      return (course.pluginKeys as string[]).includes(key);
-    }
-    return this.plugins.isEnabled(course.organizationId, key);
+    return this.plugins.isEnabledForCourse(course, key);
   }
 }

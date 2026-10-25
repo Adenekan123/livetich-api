@@ -129,7 +129,7 @@ export class TunnelGateway
       where: { id: p.sessionId },
       include: {
         course: {
-          select: { id: true, instructorId: true, organizationId: true },
+          select: { id: true, instructorId: true, organizationId: true, pluginKeys: true },
         },
       },
     });
@@ -137,12 +137,7 @@ export class TunnelGateway
       return this.fail(client, 'NOT_JOINABLE', 'Session not found or ended');
     }
 
-    if (
-      !(await this.plugins.isEnabled(
-        session.course.organizationId,
-        PLUGIN_CODE_INSTRUCTION,
-      ))
-    ) {
+    if (!(await this.plugins.isEnabledForCourse(session.course, PLUGIN_CODE_INSTRUCTION))) {
       return this.fail(client, 'FORBIDDEN', 'Code Instruction is not enabled');
     }
 
