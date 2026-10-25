@@ -20,4 +20,6 @@ export interface JwtPayload {
    * every session but this one.
    */
   recorder?: { sessionId: string; recordingId: string };
+  /** Credential usable only by the forwarded preview for this session and port. */
+  preview?: { sessionId: string; port: number };
 }

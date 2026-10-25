@@ -115,6 +115,9 @@ export class ProxyController {
     } catch {
       return res.status(401).send('Invalid or expired authorization token');
     }
+    if (user.preview && (user.preview.sessionId !== sessionId || user.preview.port !== port)) {
+      return res.status(403).send('Preview token is not valid for this session or port');
+    }
 
     // This route accepts the short-lived realtime token in a query parameter
     // or cookie because browser iframes cannot set Authorization headers.

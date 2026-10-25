@@ -32,6 +32,7 @@ import {
   SetQuickAccessDto,
 } from './dto/quick-access.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
+import { PreviewTokenDto } from './dto/preview-token.dto';
 import { AllowUnverified, Public } from './jwt-auth.guard';
 import type { JwtPayload } from './jwt-payload';
 
@@ -279,6 +280,14 @@ export class AuthController {
   @Post('realtime-token')
   realtimeToken(@CurrentUser() user: JwtPayload) {
     return this.auth.mintRealtimeToken(user);
+  }
+
+  /** Credential scoped to one forwarded classroom preview. */
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  @HttpCode(200)
+  @Post('preview-token')
+  previewToken(@CurrentUser() user: JwtPayload, @Body() dto: PreviewTokenDto) {
+    return this.auth.mintPreviewToken(user, dto.sessionId, dto.port);
   }
 
   /** Sends (or resends) the 6-digit verification code to the current user. */

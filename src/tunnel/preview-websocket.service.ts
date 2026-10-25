@@ -77,6 +77,9 @@ export class PreviewWebSocketService implements OnModuleInit, OnModuleDestroy {
     } catch {
       return this.reject(socket, 401, 'Preview authorization expired');
     }
+    if (user.preview && (user.preview.sessionId !== sessionId || user.preview.port !== port)) {
+      return this.reject(socket, 403, 'Preview token scope mismatch');
+    }
     if (user.recorder) return this.reject(socket, 401, 'Recorder token not allowed');
     const account = await this.authCache.getState(user.sub);
     if (!account || account.status === UserStatus.DISABLED || !account.emailVerified) {

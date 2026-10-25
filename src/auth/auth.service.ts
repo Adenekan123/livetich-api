@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
-import { Invite, Role, UserStatus } from '@prisma/client';
+import { Invite, Role, SessionStatus, UserStatus } from '@prisma/client';
 import { hash as bcryptHash, verify as bcryptVerify } from '@node-rs/bcrypt';
 import { createHash, randomBytes, randomInt } from 'crypto';
 import { MailService } from '../mail/mail.service';
@@ -585,6 +585,48 @@ export class AuthService {
       isSuperAdmin: user.isSuperAdmin,
     };
     return { token: this.jwt.sign(payload, { expiresIn: '15m' }) };
+  }
+
+  /** A longer-lived preview credential that cannot be replayed against APIs or
+   *  another session/port. The proxy and preview websocket enforce its scope. */
+  async mintPreviewToken(
+    user: JwtPayload,
+    sessionId: string,
+    port: number,
+  ): Promise<{ token: string }> {
+    const session = await this.prisma.liveSession.findUnique({
+      where: { id: sessionId },
+      include: { course: { select: { id: true, instructorId: true, organizationId: true } } },
+    });
+    if (!session || session.status === SessionStatus.ENDED) {
+      throw new BadRequestException('Session not found or ended');
+    }
+
+    if (user.role === Role.INSTRUCTOR) {
+      if (session.course.instructorId !== user.sub) throw new ForbiddenException('Not your session');
+    } else if (user.role === Role.ORG_ADMIN) {
+      if (!user.organizationId || session.course.organizationId !== user.organizationId) {
+        throw new ForbiddenException('Not your organisation session');
+      }
+    } else {
+      const enrollment = await this.prisma.enrollment.findUnique({
+        where: { courseId_studentId: { courseId: session.course.id, studentId: user.sub } },
+        select: { id: true },
+      });
+      if (!enrollment) throw new ForbiddenException('Not enrolled in course');
+    }
+
+    const payload: JwtPayload = {
+      sub: user.sub,
+      role: user.role,
+      name: user.name,
+      email: user.email,
+      organizationId: user.organizationId,
+      emailVerified: user.emailVerified,
+      isSuperAdmin: user.isSuperAdmin,
+      preview: { sessionId, port },
+    };
+    return { token: this.jwt.sign(payload, { expiresIn: '4h' }) };
   }
 
   // ---------- Email verification (6-digit OTP) ----------

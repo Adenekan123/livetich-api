@@ -70,6 +70,9 @@ export class JwtAuthGuard implements CanActivate {
     if (payload.recorder && !allowRecorder) {
       throw new UnauthorizedException('Recorder tokens cannot be used here');
     }
+    if (payload.preview) {
+      throw new UnauthorizedException('Preview tokens cannot be used for API requests');
+    }
 
     // The token is stateless (7d), so a disabled/deleted account must be
     // rejected here — not just at login — to end any active session. Cached in

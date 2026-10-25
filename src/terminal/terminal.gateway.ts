@@ -84,6 +84,11 @@ export class TerminalGateway
       client.disconnect(true);
       return false;
     }
+    if (user.preview) {
+      client.emit('error', { code: 'UNAUTHORIZED', message: 'Preview token cannot join classroom sockets' });
+      client.disconnect(true);
+      return false;
+    }
     client.data.user = user;
     client.data.sessionIds = new Set();
 
