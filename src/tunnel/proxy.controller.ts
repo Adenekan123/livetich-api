@@ -258,8 +258,12 @@ export class ProxyController {
       this.tunnelGateway.sendAbort(hostSocketId, reqId);
     });
 
-    // Abort if client disconnects before completion
-    req.on('close', () => {
+    // IncomingMessage's `close` event also fires after the request body has
+    // been fully received, which is normal for GET requests. Watch the outgoing
+    // response instead and abort only when the browser disconnects before the
+    // tunneled response has finished.
+    res.on('close', () => {
+      if (res.writableFinished) return;
       this.tunnelService.abortRequest(reqId);
       this.tunnelGateway.sendAbort(hostSocketId, reqId);
     });
