@@ -152,7 +152,7 @@ export class ProxyController {
       where: { id: sessionId },
       include: {
         course: {
-          select: { id: true, instructorId: true },
+          select: { id: true, instructorId: true, organizationId: true },
         },
       },
     });
@@ -164,6 +164,10 @@ export class ProxyController {
     if (user.role === Role.INSTRUCTOR) {
       if (session.course.instructorId !== user.sub) {
         return res.status(403).send('Not your session');
+      }
+    } else if (user.role === Role.ORG_ADMIN) {
+      if (!user.organizationId || session.course.organizationId !== user.organizationId) {
+        return res.status(403).send('Not your organisation session');
       }
     } else {
       const enrolled = await this.prisma.enrollment.findUnique({

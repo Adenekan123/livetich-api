@@ -85,11 +85,15 @@ export class PreviewWebSocketService implements OnModuleInit, OnModuleDestroy {
 
     const session = await this.prisma.liveSession.findUnique({
       where: { id: sessionId },
-      include: { course: { select: { id: true, instructorId: true } } },
+      include: { course: { select: { id: true, instructorId: true, organizationId: true } } },
     });
     if (!session || session.status === SessionStatus.ENDED) return this.reject(socket, 404, 'Session not found');
     if (user.role === Role.INSTRUCTOR) {
       if (session.course.instructorId !== user.sub) return this.reject(socket, 403, 'Not your session');
+    } else if (user.role === Role.ORG_ADMIN) {
+      if (!user.organizationId || session.course.organizationId !== user.organizationId) {
+        return this.reject(socket, 403, 'Not your organisation session');
+      }
     } else {
       const enrollment = await this.prisma.enrollment.findUnique({
         where: { courseId_studentId: { courseId: session.course.id, studentId: user.sub } },
