@@ -13,11 +13,11 @@ async function bootstrap() {
   // proxies like Caddy and Cloudflare so req.ip and rate limiters reflect real clients.
   const expressApp = app.getHttpAdapter().getInstance();
   expressApp.set('trust proxy', true);
+  const previewDomain = process.env.PREVIEW_DOMAIN?.trim().toLowerCase().replace(/^\.+|\.+$/g, '');
 
   // Route isolated preview origins back through the authenticated proxy. Each
   // session/port gets its own origin, keeping framework assets and app routes
   // rooted at `/` without requiring framework-specific base-path settings.
-  const previewDomain = process.env.PREVIEW_DOMAIN?.trim().toLowerCase().replace(/^\.+|\.+$/g, '');
   expressApp.use((req: import('express').Request, _res: import('express').Response, next: () => void) => {
     const host = req.hostname.toLowerCase();
     let subdomain: string | undefined;
@@ -46,6 +46,25 @@ async function bootstrap() {
   // CORS must be pinned in production — allow configured origin as well as
   // official livetich.com origins and legacy aliases.
   const webOrigin = process.env.WEB_ORIGIN;
+  const isAllowedPreviewOrigin = (origin: string): boolean => {
+    if (!previewDomain) return false;
+    try {
+      const parsed = new URL(origin);
+      if (parsed.protocol !== 'https:') return false;
+      const suffix = `.${previewDomain}`;
+      const hostname = parsed.hostname.toLowerCase();
+      if (!hostname.endsWith(suffix)) return false;
+      const previewHost = hostname.slice(0, -suffix.length);
+      if (previewHost.includes('.')) return false;
+      const match = previewHost.match(/^[a-z0-9-]+-(\d{1,5})$/);
+      if (!match) return false;
+      const port = Number(match[1]);
+      return port >= 1 && port <= 65535;
+    } catch {
+      return false;
+    }
+  };
+
   app.enableCors({
     origin: (
       origin: string | undefined,
@@ -59,7 +78,8 @@ async function bootstrap() {
         origin === 'https://livetich.com' ||
         origin === 'https://app.livetich.com' ||
         origin === 'https://livetich.nekan.dev' ||
-        /^https:\/\/([a-z0-9-]+\.)?livetich\.com$/i.test(origin)
+        /^https:\/\/([a-z0-9-]+\.)?livetich\.com$/i.test(origin) ||
+        isAllowedPreviewOrigin(origin)
       ) {
         return callback(null, origin);
       }
